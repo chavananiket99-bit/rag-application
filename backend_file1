@@ -1,0 +1,1766 @@
+//backend / models / auth.py
+from pydantic import BaseModel
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+//backend / models / question.py
+from pydantic import BaseModel
+
+class QuestionRequest(BaseModel):
+    question: str
+    conversation_id: str | None = None
+
+//backend / routers / auth.py
+from fastapi import APIRouter, HTTPException
+
+from models.auth import LoginRequest
+from services.auth_service import auth_service
+from services.security import create_access_token
+
+router = APIRouter(
+    prefix="/auth",
+    tags=["Authentication"]
+)
+
+@router.post("/login")
+def login(request: LoginRequest):
+    user = auth_service.authenticate(username=request.username, password=request.password)
+
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    access_token = create_access_token(user)
+
+    return {
+        "success": True,
+        "user": user,
+        "access_token": access_token,
+        "token_type": "bearer",
+    }
+
+//backend / routers / chat.py
+empty
+
+//backend / routers / upload.py
+empty
+
+//backend / services / agreement_analysis_service.py
+import calendar
+import re
+from datetime import date, timedelta
+
+from services.agreement_expiry_service import (
+    DATE_PATTERN,
+    MONTHS,
+    extract_agreement_expiry,
+)
+
+
+START_DATE_PATTERNS = [
+    re.compile(
+        rf"(?:effective|commencing|commences|valid)\s+(?:as\s+of\s+|from\s+|on\s+){DATE_PATTERN}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?:effective|commencement|start)\s+date\s*(?:is|:)?\s*{DATE_PATTERN}",
+        re.IGNORECASE,
+    ),
+]
+
+TENURE_PATTERN = re.compile(
+    r"valid\s+for\s+(?:(?:\w+\s+)?\((?P<number>\d+)\)|(?P<plain>\d+))\s*"
+    r"(?P<unit>years?|months?)",
+    re.IGNORECASE,
+)
+
+ESIGN_PATTERN = re.compile(
+    r"(?P<name>[A-Za-z][A-Za-z .'-]{2,80})\s*\n\s*(?P=name)\s*\n"
+    r".{0,120}?(?:e\s*[- ]?sign\s+by|signdesk)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+TRANSACTION_RULES = [
+    ("Contract Manufacturing", ("contract manufacturing", "manufacturing services")),
+    ("Design Services", ("design services", "engineering design", "design and development")),
+    ("Royalty", ("royalty", "license fee", "licence fee")),
+    ("Sale of Goods", ("sale of goods", "sell goods", "seller", "buyer")),
+    ("Purchase / Procurement", ("procurement services", "purchase agreement", "procure on behalf")),
+    (
+        "Service Arrangement",
+        (
+            "service provider",
+            "scope of services",
+            "provide the services",
+            "transportation services",
+            "logistics services",
+        ),
+    ),
+]
+
+
+def _date_from_match(match):
+    try:
+        return date(
+            int(match.group("year")),
+            MONTHS[match.group("month").lower()],
+            int(match.group("day")),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _add_months(start_date, months):
+    month_index = start_date.month - 1 + months
+    year = start_date.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(start_date.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _extract_start_date(text):
+    candidates = []
+    for pattern in START_DATE_PATTERNS:
+        for match in pattern.finditer(text):
+            parsed_date = _date_from_match(match)
+            if parsed_date:
+                candidates.append(parsed_date)
+    return min(candidates) if candidates else None
+
+
+def _extract_tenure_months(text):
+    match = TENURE_PATTERN.search(text)
+    if not match:
+        return None
+
+    value = int(match.group("number") or match.group("plain"))
+    return value * 12 if match.group("unit").lower().startswith("year") else value
+
+
+def _extract_signatories(text):
+    signatories = []
+    seen = set()
+
+    for match in ESIGN_PATTERN.finditer(text):
+        name = re.sub(r"\s+", " ", match.group("name")).strip()
+        normalized_name = name.casefold()
+        if normalized_name not in seen:
+            seen.add(normalized_name)
+            signatories.append(name)
+
+    return signatories
+
+
+def _classify_transaction(text):
+    normalized = text.lower()
+    best_category = None
+    best_score = 0
+
+    for category, terms in TRANSACTION_RULES:
+        score = sum(normalized.count(term) for term in terms)
+        if score > best_score:
+            best_category = category
+            best_score = score
+
+    return best_category
+
+
+def analyze_agreement(text, current_date=None, expiry_override=None):
+    normalized_text = re.sub(r"[ \t]+", " ", str(text or ""))
+    today = current_date or date.today()
+    start_date = _extract_start_date(normalized_text)
+    tenure_months = _extract_tenure_months(normalized_text)
+    expiry_value = expiry_override or extract_agreement_expiry(normalized_text)
+    end_date = date.fromisoformat(expiry_value) if expiry_value else None
+    end_date_source = "Document" if end_date else None
+
+    if not end_date and start_date and tenure_months:
+        end_date = _add_months(start_date, tenure_months) - timedelta(days=1)
+        expiry_value = end_date.isoformat()
+        end_date_source = "Calculated from start date and tenure"
+
+    if end_date:
+        lifecycle_status = "Expired" if end_date < today else "Active"
+    elif start_date and start_date > today:
+        lifecycle_status = "Not Started"
+    else:
+        lifecycle_status = "Unknown"
+
+    signatories = _extract_signatories(normalized_text)
+    if len(signatories) >= 2:
+        signature_status = "Multiple Signatures Detected"
+    elif len(signatories) == 1:
+        signature_status = "Potentially Incomplete"
+    else:
+        signature_status = "Not Detected"
+
+    actualization_required = bool(
+        re.search(
+            r"\bactuali[sz](?:ation|e|ed|ing)\b",
+            normalized_text,
+            re.IGNORECASE,
+        )
+    )
+
+    return {
+        "start_date": start_date.isoformat() if start_date else None,
+        "tenure_months": tenure_months,
+        "expiry_date": expiry_value,
+        "end_date_source": end_date_source,
+        "lifecycle_status": lifecycle_status,
+        "signatories": signatories,
+        "signatory_count": len(signatories),
+        "signature_status": signature_status,
+        "signature_complete": None,
+        "transaction_type": _classify_transaction(normalized_text),
+        "actualization_required": actualization_required,
+    }
+
+//backend / services / agreement_expiry_service.py
+import re
+from datetime import date
+
+
+MONTHS = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
+
+DATE_PATTERN = (
+    r"(?P<day>\d{1,2})\s*(?:st|nd|rd|th)?\s*"
+    r"(?P<month>january|february|march|april|may|june|july|august|"
+    r"september|october|november|december)\s*[,\-]?\s*"
+    r"(?P<year>\d{4})"
+)
+
+EXPIRY_PATTERNS = [
+    re.compile(
+        rf"(?:valid\s*(?:up\s*to|until|till)|"
+        rf"(?:will|shall)\s*expire\s*on|expires?\s*on|"
+        rf"expiry\s*date\s*(?:is|:)?)\s*{DATE_PATTERN}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?:agreement\s+)?(?:is\s+)?valid\s+from\s+{DATE_PATTERN}"
+        rf".{{0,80}}?\b(?:to|until|till)\s+"
+        rf"(?P<end_day>\d{{1,2}})\s*(?:st|nd|rd|th)?\s*"
+        rf"(?P<end_month>january|february|march|april|may|june|july|august|"
+        rf"september|october|november|december)\s*[,\-]?\s*"
+        rf"(?P<end_year>\d{{4}})",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"(?:agreement\s+)?(?:is\s+)?valid\s+for.{{0,100}}?"
+        rf"effective\s+from\s+{DATE_PATTERN}.{{0,80}}?"
+        rf"(?:to|valid\s*(?:up\s*to|until|till))\s+"
+        rf"(?P<end_day>\d{{1,2}})\s*(?:st|nd|rd|th)?\s*"
+        rf"(?P<end_month>january|february|march|april|may|june|july|august|"
+        rf"september|october|november|december)\s*[,\-]?\s*"
+        rf"(?P<end_year>\d{{4}})",
+        re.IGNORECASE,
+    ),
+]
+
+
+def _date_from_match(match):
+    day = match.groupdict().get("end_day") or match.group("day")
+    month = match.groupdict().get("end_month") or match.group("month")
+    year = match.groupdict().get("end_year") or match.group("year")
+
+    try:
+        return date(
+            int(year),
+            MONTHS[month.lower()],
+            int(day),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def extract_agreement_expiry(text):
+    if not text:
+        return None
+
+    normalized_text = re.sub(
+        r"\s+",
+        " ",
+        str(text).replace("\u00a0", " "),
+    )
+    candidates = []
+
+    for pattern in EXPIRY_PATTERNS:
+        for match in pattern.finditer(normalized_text):
+            parsed_date = _date_from_match(match)
+            if parsed_date:
+                candidates.append(parsed_date)
+
+    if not candidates:
+        return None
+
+    return max(candidates).isoformat()
+
+//backend / services / auth_dependency.py
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from services.security import decode_access_token
+
+security = HTTPBearer(
+    auto_error=False
+)
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(
+        security
+    ),
+):
+    """
+    Validate the JWT bearer token and return
+    the authenticated user information.
+    """
+    # ============================================================
+    # CREDENTIAL CHECK
+    # ============================================================
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+        )
+
+    token = (
+        credentials.credentials
+        if credentials.credentials
+        else ""
+    )
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+        )
+
+    # ============================================================
+    # JWT VALIDATION
+    # ============================================================
+    try:
+        payload = decode_access_token(
+            token
+        )
+
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired authentication token.",
+        )
+
+    if not payload or not isinstance(
+        payload,
+        dict
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired authentication token.",
+        )
+
+    # ============================================================
+    # REQUIRED CLAIMS
+    # ============================================================
+    user_id = payload.get(
+        "sub"
+    )
+
+    username = payload.get(
+        "username"
+    )
+
+    if not user_id or not username:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token.",
+        )
+
+    # ============================================================
+    # USER OBJECT
+    #
+    # Keep the existing response structure so the frontend
+    # does not need to change.
+    # ============================================================
+    return {
+        "id": str(user_id),
+        "username": str(
+            username
+        ),
+        "name": str(
+            payload.get(
+                "name",
+                username
+            )
+        ),
+        "loginType": payload.get(
+            "loginType",
+            "form"
+        ),
+    }
+
+//backend / services / auth_service.py
+import hashlib
+import hmac
+import os
+from datetime import datetime, timedelta, timezone
+import jwt
+
+class AuthService:
+    """
+    Development authentication service.
+    Phase 1:
+    - Validates development credentials
+    - Generates JWT access tokens
+    - Validates JWT access tokens
+    This is intentionally kept simple for the current development
+    environment. Corporate SSO / database-backed users can be added later.
+    """
+    DEMO_USERNAME = os.getenv("DEMO_USERNAME", "demo")
+    DEMO_PASSWORD = os.getenv("DEMO_PASSWORD", "demo123")
+
+    USER_ONE_USERNAME = os.getenv("USER_ONE_USERNAME", "user1")
+    USER_ONE_PASSWORD = os.getenv("USER_ONE_PASSWORD", "user1@123")
+
+    USER_TWO_USERNAME = os.getenv("USER_TWO_USERNAME", "user2")
+    USER_TWO_PASSWORD = os.getenv("USER_TWO_PASSWORD", "user2@123")
+
+    JWT_SECRET_KEY = os.getenv(
+        "JWT_SECRET_KEY",
+        "CHANGE_THIS_DEVELOPMENT_SECRET_KEY",
+    )
+
+    JWT_ALGORITHM = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+    @classmethod
+    def _get_accounts(cls):
+        """
+        Registered development accounts.
+        Each account gets a distinct id so uploaded documents
+        and conversations stay isolated per user.
+        """
+        return [
+            {
+                "id": "demo-user",
+                "name": "Demo User",
+                "username": cls.DEMO_USERNAME,
+                "password": cls.DEMO_PASSWORD,
+            },
+            {
+                "id": "user-one",
+                "name": "User One",
+                "username": cls.USER_ONE_USERNAME,
+                "password": cls.USER_ONE_PASSWORD,
+            },
+            {
+                "id": "user-two",
+                "name": "User Two",
+                "username": cls.USER_TWO_USERNAME,
+                "password": cls.USER_TWO_PASSWORD,
+            },
+        ]
+
+    @classmethod
+    def authenticate(cls, username: str, password: str):
+        username = username.strip()
+        if not username or not password:
+            return None
+
+        matched = None
+
+        for account in cls._get_accounts():
+            username_valid = hmac.compare_digest(
+                username,
+                account["username"],
+            )
+
+            password_valid = hmac.compare_digest(
+                password,
+                account["password"],
+            )
+
+            if username_valid and password_valid:
+                matched = account
+                break
+
+        if matched is None:
+            return None
+
+        return {
+            "id": matched["id"],
+            "name": matched["name"],
+            "username": matched["username"],
+            "loginType": "form",
+        }
+
+    @classmethod
+    def create_access_token(cls, user: dict) -> str:
+        now = datetime.now(timezone.utc)
+        expires_at = now + timedelta(
+            minutes=cls.ACCESS_TOKEN_EXPIRE_MINUTES
+        )
+
+        payload = {
+            "sub": user["id"],
+            "username": user["username"],
+            "name": user["name"],
+            "loginType": user.get("loginType", "form"),
+            "iat": now,
+            "exp": expires_at,
+        }
+
+        return jwt.encode(
+            payload,
+            cls.JWT_SECRET_KEY,
+            algorithm=cls.JWT_ALGORITHM,
+        )
+
+    @classmethod
+    def decode_access_token(cls, token: str) -> dict:
+        try:
+            payload = jwt.decode(
+                token,
+                cls.JWT_SECRET_KEY,
+                algorithms=[cls.JWT_ALGORITHM],
+            )
+            return payload
+        except jwt.ExpiredSignatureError:
+            raise ValueError("Authentication token has expired.")
+        except jwt.InvalidTokenError:
+            raise ValueError("Invalid authentication token.")
+
+auth_service = AuthService()
+
+//backend / services / chunk_service.py
+import logging
+logger = logging.getLogger("uvicorn.error")
+
+def split_text(
+    pages,
+    chunk_size=1000,
+    overlap=200,
+):
+    """
+    Split page-aware document text into overlapping chunks.
+    If page_number is missing/None, the position of the page
+    in the pages list is used as a fallback.
+    """
+    if not pages:
+        return []
+
+    if chunk_size <= 0:
+        raise ValueError(
+            "chunk_size must be greater than zero."
+        )
+
+    if overlap < 0:
+        raise ValueError(
+            "overlap cannot be negative."
+        )
+
+    if overlap >= chunk_size:
+        raise ValueError(
+            "overlap must be smaller than chunk_size."
+        )
+
+    chunks = []
+
+    for page_index, page in enumerate(
+        pages,
+        start=1
+    ):
+        if not isinstance(page, dict):
+            continue
+
+        # ----------------------------------------------------
+        # Preserve supplied page number.
+        # If missing/None, fall back to actual page position.
+        # ----------------------------------------------------
+        page_number = page.get(
+            "page_number"
+        )
+
+        if page_number is None:
+            page_number = page_index
+
+        text = str(
+            page.get(
+                "text",
+                ""
+            )
+        ).strip()
+
+        if not text:
+            continue
+
+        text_length = len(text)
+
+        start = 0
+
+        while start < text_length:
+            end = min(
+                start + chunk_size,
+                text_length
+            )
+
+            chunk_text = text[
+                start:end
+            ].strip()
+
+            if chunk_text:
+                chunks.append(
+                    {
+                        "text": chunk_text,
+                        "page_number": page_number,
+                    }
+                )
+
+            # Prevent infinite loops.
+            if end >= text_length:
+                break
+
+            start += (
+                chunk_size - overlap
+            )
+
+    logger.info(
+        "Total chunks created: %s",
+        len(chunks)
+    )
+
+    for index, chunk in enumerate(
+        chunks
+    ):
+        logger.info(
+            "--- Chunk %s | Page: %s | Characters: %s ---",
+            index + 1,
+            chunk.get("page_number"),
+            len(
+                chunk.get(
+                    "text",
+                    ""
+                )
+            ),
+        )
+    return chunks
+
+//backend / services / conversation_service.py
+import json
+import logging
+import threading
+import uuid
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+logger = logging.getLogger("uvicorn.error")
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+METADATA_DIR = BASE_DIR / "metadata"
+CONVERSATIONS_FILE = METADATA_DIR / "conversations.json"
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _build_title(question):
+    text = (question or "").strip().replace("\n", " ")
+
+    if not text:
+        return "New conversation"
+
+    return text[:60] + ("..." if len(text) > 60 else "")
+
+
+class ConversationService:
+    def __init__(self):
+        self.conversations = defaultdict(dict)
+        self.lock = threading.Lock()
+        self._load()
+
+    # ========================================================
+    # PERSISTENCE
+    # ========================================================
+    def _load(self):
+        """
+        Restore conversations from disk so chat history
+        survives a backend restart.
+        """
+        if not CONVERSATIONS_FILE.exists():
+            return
+
+        try:
+            with open(
+                CONVERSATIONS_FILE,
+                "r",
+                encoding="utf-8",
+            ) as file:
+                data = json.load(file)
+
+            if not isinstance(data, dict):
+                return
+
+            for user_id, user_conversations in data.items():
+                if isinstance(user_conversations, dict):
+                    self.conversations[user_id] = user_conversations
+
+        except Exception:
+            logger.warning(
+                "Unable to restore conversation history. "
+                "Starting with an empty history.",
+                exc_info=True,
+            )
+
+    def _persist(self):
+        """
+        Write conversations to disk.
+        Must be called while self.lock is held.
+        Failures are logged and never interrupt a chat request.
+        """
+        try:
+            METADATA_DIR.mkdir(parents=True, exist_ok=True)
+
+            temp_file = CONVERSATIONS_FILE.with_suffix(".tmp")
+
+            with open(
+                temp_file,
+                "w",
+                encoding="utf-8",
+            ) as file:
+                json.dump(
+                    dict(self.conversations),
+                    file,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                file.flush()
+
+            temp_file.replace(CONVERSATIONS_FILE)
+
+        except Exception:
+            logger.warning(
+                "Unable to save conversation history.",
+                exc_info=True,
+            )
+
+    # ========================================================
+    # CREATE CONVERSATION
+    # ========================================================
+    def create_conversation(
+        self,
+        user_id,
+        document_ids=None,
+        document_names=None,
+    ):
+        conversation_id = str(uuid.uuid4())
+        conversation = {
+            "id": conversation_id,
+            "user_id": user_id,
+            "title": "New conversation",
+            "created_at": _now_iso(),
+            "updated_at": _now_iso(),
+            "messages": [],
+            # Documents actually used by the latest answer
+            "current_document": None,
+            "current_documents": [],
+            # All documents available to this conversation
+            "available_documents": (
+                list(document_names or [])
+            ),
+            "available_document_ids": (
+                list(document_ids or [])
+            ),
+            "current_topic": None,
+            "last_question": None,
+            "last_rewritten_question": None,
+            "last_answer": None,
+            "last_sources": [],
+        }
+
+        with self.lock:
+            self.conversations[user_id][
+                conversation_id
+            ] = conversation
+            self._persist()
+        return conversation
+
+    # ========================================================
+    # GET CONVERSATION
+    # ========================================================
+    def get_conversation(
+        self,
+        user_id,
+        conversation_id,
+    ):
+        if not conversation_id:
+            return None
+
+        with self.lock:
+            return (
+                self.conversations
+                .get(user_id, {})
+                .get(conversation_id)
+            )
+
+    # ========================================================
+    # GET OR CREATE CONVERSATION
+    # ========================================================
+    def get_or_create_conversation(
+        self,
+        user_id,
+        conversation_id=None,
+        document_ids=None,
+        document_names=None,
+    ):
+        if conversation_id:
+            conversation = self.get_conversation(
+                user_id,
+                conversation_id,
+            )
+
+            if conversation:
+                return conversation
+
+        return self.create_conversation(
+            user_id=user_id,
+            document_ids=document_ids,
+            document_names=document_names,
+        )
+
+    # ========================================================
+    # SET AVAILABLE DOCUMENTS
+    # ========================================================
+    def set_available_documents(
+        self,
+        user_id,
+        conversation_id,
+        document_ids=None,
+        document_names=None,
+    ):
+        conversation = self.get_conversation(
+            user_id,
+            conversation_id,
+        )
+
+        if not conversation:
+            return None
+
+        with self.lock:
+            if document_ids is not None:
+                conversation[
+                    "available_document_ids"
+                ] = list(document_ids)
+
+            if document_names is not None:
+                conversation[
+                    "available_documents"
+                ] = list(document_names)
+        return conversation
+
+    # ========================================================
+    # GET AVAILABLE DOCUMENTS
+    # ========================================================
+    def get_available_documents(
+        self,
+        user_id,
+        conversation_id,
+    ):
+        conversation = self.get_conversation(
+            user_id,
+            conversation_id,
+        )
+
+        if not conversation:
+            return []
+        
+        return list(
+            conversation.get(
+                "available_documents",
+                [],
+            )
+        )
+
+    # ========================================================
+    # ADD MESSAGE
+    # ========================================================
+    def add_message(
+        self,
+        user_id,
+        conversation_id,
+        question,
+        answer,
+        sources=None,
+        rewritten_question=None,
+        document_names=None,
+        topic=None,
+    ):
+        conversation = self.get_conversation(
+            user_id,
+            conversation_id,
+        )
+
+        if not conversation:
+            return None
+
+        sources = sources or []
+
+        # ----------------------------------------------------
+        # Determine documents used by this answer
+        # ----------------------------------------------------
+        source_documents = []
+        for source in sources:
+            filename = source.get(
+                "filename"
+            )
+
+            if (
+                filename
+                and filename
+                not in source_documents
+            ):
+                source_documents.append(
+                    filename
+                )
+
+        # ----------------------------------------------------
+        # Preserve explicitly supplied document names
+        # ----------------------------------------------------
+        if document_names:
+            current_documents = []
+            for filename in document_names:
+                if (
+                    filename
+                    and filename
+                    not in current_documents
+                ):
+                    current_documents.append(
+                        filename
+                    )
+        else:
+            current_documents = (
+                source_documents
+            )
+
+        # ----------------------------------------------------
+        # Current document
+        # ----------------------------------------------------
+        current_document = (
+            current_documents[0]
+            if current_documents
+            else None
+        )
+
+        message = {
+            "role": "user",
+            "question": question,
+            "rewritten_question": (
+                rewritten_question
+                if rewritten_question is not None
+                else question
+            ),
+            "answer": answer,
+            "documents": current_documents,
+            "sources": sources,
+        }
+
+        with self.lock:
+            conversation[
+                "messages"
+            ].append(message)
+
+            conversation[
+                "last_question"
+            ] = question
+
+            conversation[
+                "last_rewritten_question"
+            ] = (
+                rewritten_question
+                if rewritten_question is not None
+                else question
+            )
+
+            conversation[
+                "last_answer"
+            ] = answer
+
+            conversation[
+                "last_sources"
+            ] = sources
+
+            conversation[
+                "current_documents"
+            ] = current_documents
+
+            conversation[
+                "current_document"
+            ] = current_document
+
+            if topic is not None:
+                conversation[
+                    "current_topic"
+                ] = topic
+
+            # ------------------------------------------------
+            # If documents were supplied for this message,
+            # merge them into the conversation's available
+            # document list.
+            # ------------------------------------------------
+            if document_names:
+                existing_documents = (
+                    conversation.get(
+                        "available_documents",
+                        [],
+                    )
+                )
+
+                for filename in document_names:
+                    if (
+                        filename
+                        and filename
+                        not in existing_documents
+                    ):
+                        existing_documents.append(
+                            filename
+                        )
+
+                conversation[
+                    "available_documents"
+                ] = existing_documents
+
+            conversation["updated_at"] = _now_iso()
+
+            if not conversation.get("title") or conversation[
+                "title"
+            ] == "New conversation":
+                conversation["title"] = _build_title(question)
+
+            self._persist()
+        return message
+
+    # ========================================================
+    # GET RECENT MESSAGES
+    # ========================================================
+    def get_recent_messages(
+        self,
+        user_id,
+        conversation_id,
+        limit=10,
+    ):
+        conversation = self.get_conversation(
+            user_id,
+            conversation_id,
+        )
+
+        if not conversation:
+            return []
+
+        messages = conversation.get(
+            "messages",
+            [],
+        )
+
+        return messages[-limit:]
+
+    # ========================================================
+    # GET LAST MESSAGE
+    # ========================================================
+    def get_last_message(
+        self,
+        user_id,
+        conversation_id,
+    ):
+        conversation = self.get_conversation(
+            user_id,
+            conversation_id,
+        )
+
+        if not conversation:
+            return None
+
+        messages = conversation.get(
+            "messages",
+            [],
+        )
+
+        if not messages:
+            return None
+
+        return messages[-1]
+
+    # ========================================================
+    # GET CONTEXT
+    # ========================================================
+    def get_context(
+        self,
+        user_id,
+        conversation_id,
+    ):
+        conversation = self.get_conversation(
+            user_id,
+            conversation_id,
+        )
+
+        if not conversation:
+            return {
+                "last_question": None,
+                "last_rewritten_question": None,
+                "last_answer": None,
+                "current_document": None,
+                "current_documents": [],
+                "available_documents": [],
+                "available_document_ids": [],
+                "current_topic": None,
+                "recent_messages": [],
+            }
+
+        return {
+            "last_question": conversation.get(
+                "last_question"
+            ),
+
+            "last_rewritten_question":
+                conversation.get(
+                    "last_rewritten_question"
+                ),
+
+            "last_answer": conversation.get(
+                "last_answer"
+            ),
+
+            "current_document":
+                conversation.get(
+                    "current_document"
+                ),
+
+            "current_documents":
+                list(
+                    conversation.get(
+                        "current_documents",
+                        [],
+                    )
+                ),
+
+            "available_documents":
+                list(
+                    conversation.get(
+                        "available_documents",
+                        [],
+                    )
+                ),
+
+            "available_document_ids":
+                list(
+                    conversation.get(
+                        "available_document_ids",
+                        [],
+                    )
+                ),
+
+            "current_topic":
+                conversation.get(
+                    "current_topic"
+                ),
+
+            "recent_messages":
+                list(
+                    conversation.get(
+                        "messages",
+                        []
+                    )[-10:]
+                ),
+        }
+
+    # ========================================================
+    # UPDATE TOPIC
+    # ========================================================
+    def update_topic(
+        self,
+        user_id,
+        conversation_id,
+        topic,
+    ):
+        conversation = self.get_conversation(
+            user_id,
+            conversation_id,
+        )
+
+        if not conversation:
+            return None
+
+        with self.lock:
+            conversation[
+                "current_topic"
+            ] = topic
+        return conversation
+
+    # ========================================================
+    # CLEAR CONVERSATION
+    # ========================================================
+    def clear_conversation(
+        self,
+        user_id,
+        conversation_id,
+    ):
+        with self.lock:
+            user_conversations = (
+                self.conversations.get(
+                    user_id,
+                    {}
+                )
+            )
+
+            if conversation_id in user_conversations:
+                del user_conversations[
+                    conversation_id
+                ]
+                self._persist()
+                return True
+        return False
+
+    # ========================================================
+    # LIST CONVERSATIONS (HISTORY)
+    # ========================================================
+    def list_conversations(
+        self,
+        user_id,
+    ):
+        """
+        Return lightweight summaries of the user's past
+        conversations, newest first.
+        """
+        with self.lock:
+            user_conversations = list(
+                self.conversations.get(
+                    user_id,
+                    {},
+                ).values()
+            )
+
+        summaries = []
+
+        for conversation in user_conversations:
+            messages = conversation.get("messages", [])
+
+            if not messages:
+                continue
+
+            summaries.append(
+                {
+                    "id": conversation.get("id"),
+                    "title": conversation.get(
+                        "title",
+                        "New conversation",
+                    ),
+                    "created_at": conversation.get("created_at"),
+                    "updated_at": conversation.get("updated_at"),
+                    "message_count": len(messages),
+                    "documents": list(
+                        conversation.get(
+                            "available_documents",
+                            [],
+                        )
+                    ),
+                }
+            )
+
+        summaries.sort(
+            key=lambda item: item.get("updated_at") or "",
+            reverse=True,
+        )
+
+        return summaries
+
+    # ========================================================
+    # GET CONVERSATION MESSAGES
+    # ========================================================
+    def get_conversation_messages(
+        self,
+        user_id,
+        conversation_id,
+    ):
+        """
+        Return the full message list of a conversation in the
+        flat format used by the chat UI.
+        """
+        conversation = self.get_conversation(
+            user_id,
+            conversation_id,
+        )
+
+        if not conversation:
+            return None
+
+        ui_messages = []
+
+        for message in conversation.get("messages", []):
+            ui_messages.append(
+                {
+                    "role": "user",
+                    "content": message.get("question", ""),
+                }
+            )
+
+            ui_messages.append(
+                {
+                    "role": "assistant",
+                    "content": message.get("answer", ""),
+                    "sources": message.get("sources", []),
+                }
+            )
+
+        return ui_messages
+
+# ============================================================
+# GLOBAL CONVERSATION SERVICE
+# ============================================================
+conversation_service = ConversationService()
+
+//backend / services / document_manager.py
+import json
+import logging
+import uuid
+from pathlib import Path
+from datetime import datetime
+
+logger = logging.getLogger("uvicorn.error")
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+METADATA_DIR = BASE_DIR / "metadata"
+METADATA_FILE = METADATA_DIR / "documents.json"
+
+class DocumentManager:
+    def __init__(self):
+        METADATA_DIR.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        if not METADATA_FILE.exists():
+            self._atomic_write([])
+
+    # ============================================================
+    # INTERNAL WRITE
+    # ============================================================
+    def _atomic_write(self, documents):
+        temp_file = (
+            METADATA_FILE.with_suffix(".tmp")
+        )
+
+        try:
+            with open(
+                temp_file,
+                "w",
+                encoding="utf-8"
+            ) as file:
+                json.dump(
+                    documents,
+                    file,
+                    indent=4,
+                    ensure_ascii=False
+                )
+
+                file.flush()
+
+            temp_file.replace(
+                METADATA_FILE
+            )
+
+        except Exception:
+            if temp_file.exists():
+                temp_file.unlink(
+                    missing_ok=True
+                )
+            raise
+
+    # ============================================================
+    # GET DOCUMENTS
+    # ============================================================
+    def get_documents(self):
+        if not METADATA_FILE.exists():
+            return []
+
+        try:
+            with open(
+                METADATA_FILE,
+                "r",
+                encoding="utf-8"
+            ) as file:
+                data = json.load(file)
+
+            if not isinstance(data, list):
+                logger.warning(
+                    "documents.json does not contain a list. "
+                    "Returning empty document list."
+                )
+                return []
+            return data
+
+        except json.JSONDecodeError as exc:
+            logger.exception(
+                "documents.json is corrupted: %s",
+                exc
+            )
+
+            raise RuntimeError(
+                "Document metadata is corrupted."
+            ) from exc
+
+    # ============================================================
+    # SAVE DOCUMENTS
+    # ============================================================
+    def save_documents(self, documents):
+        if not isinstance(documents, list):
+            raise ValueError(
+                "documents must be a list."
+            )
+        self._atomic_write(
+            documents
+        )
+
+    # ============================================================
+    # ADD DOCUMENT
+    # ============================================================
+    def add_document(
+        self,
+        filename,
+        filesize,
+        stored_filename=None,
+        user_id=None,
+        agreement_type=None,
+        expiry_date=None,
+        analysis=None,
+    ):
+        documents = self.get_documents()
+        document = {
+            "id": str(uuid.uuid4()),
+            "filename": filename,
+            "stored_filename": (
+                stored_filename or filename
+            ),
+            "filesize": filesize,
+            "uploaded_at": (
+                datetime.now().isoformat()
+            ),
+            "status": "Indexed",
+            "user_id": user_id,
+            "agreement_type": agreement_type,
+            "expiry_date": expiry_date,
+            "analysis": analysis,
+        }
+
+        documents.append(
+            document
+        )
+        self.save_documents(
+            documents
+        )
+
+        logger.info(
+            "Document metadata created | "
+            "document_id=%s | filename=%s | user_id=%s",
+            document["id"],
+            filename,
+            user_id
+        )
+        return document
+
+    # ============================================================
+    # DELETE DOCUMENT
+    # ============================================================
+    def delete_document(
+        self,
+        document_id
+    ):
+        if not document_id:
+            return None
+
+        documents = self.get_documents()
+        document_to_delete = None
+
+        for document in documents:
+            if document.get("id") == document_id:
+                document_to_delete = document
+                break
+
+        if document_to_delete is None:
+            logger.info(
+                "Document metadata not found: %s",
+                document_id
+            )
+            return None
+
+        remaining_documents = [
+            document
+            for document in documents
+            if document.get("id") != document_id
+        ]
+
+        self.save_documents(
+            remaining_documents
+        )
+
+        logger.info(
+            "Document metadata deleted | "
+            "document_id=%s",
+            document_id
+        )
+        return document_to_delete
+
+document_manager = DocumentManager()
+
+//backend / services / document_store.py
+documents = {}
+
+def save_document(document_id, filename, chunks):
+    """
+    Store chunks using the unique document ID.
+
+    This allows multiple documents to have the same filename without overwriting each other.
+    """
+
+    documents[document_id] = {
+        "filename": filename,
+        "chunks": chunks
+    }
+
+def get_document(document_id):
+    return documents.get(document_id)
+
+def get_all_documents():
+    return documents
+
+def get_all_chunks():
+    chunks = []
+
+    for document in documents.values():
+        chunks.extend(document["chunks"])
+
+    return chunks
+
+def delete_document(document_id):
+    """
+    Remove a document from the in-memory RAG store.
+    """
+
+    if document_id in documents:
+        del documents[document_id]
+        return True
+    return False
+
+//backend / services / embedding_service.py
+from pathlib import Path
+import logging
+
+from sentence_transformers import SentenceTransformer
+
+logger = logging.getLogger("uvicorn.error")
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+MODEL_PATH = BASE_DIR / "models" / "all-MiniLM-L6-v2"
+
+class EmbeddingService:
+    def __init__(self):
+        logger.info("Loading embedding model: %s", MODEL_PATH)
+
+        if not MODEL_PATH.exists():
+            raise FileNotFoundError(f"Embedding model not found at {MODEL_PATH}")
+
+        self.model = SentenceTransformer(str(MODEL_PATH), local_files_only=True)
+        logger.info("Embedding model loaded successfully.")
+        logger.info("Embedding model dimension: %s", self.model.get_sentence_embedding_dimension())
+
+    def embed_documents(self, texts):
+
+        if not texts:
+            return[]
+
+        embeddings = self.model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+
+        return embeddings.tolist()
+
+    def embed_text(self, text):
+        if not text or not text.strip():
+            return []
+        
+        embedding = self.model.encode(text, normalize_embeddings=True, show_progress_bar=False)
+    
+        return embedding.tolist()
+
+embedding_service = EmbeddingService()
+
+//backend / services / faiss_service.py
+import json
+import logging
+from pathlib import Path
+
+import faiss
+import numpy as np
+
+logger = logging.getLogger("uvicorn.error")
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+INDEX_DIR = BASE_DIR / "indexes"
+
+INDEX_FILE = INDEX_DIR / "documents.index"
+METADATA_FILE = INDEX_DIR / "documents_metadata.json"
+
+class FAISSService:
+    def __init__(self):
+        INDEX_DIR.mkdir(parents=True, exist_ok=True)
+
+        self.index = None
+        self.metadata = []
+
+        self._load()
+
+    def _load(self):
+        """
+        Load the FAISS index and metadata from disk.
+        """
+
+        if INDEX_FILE.exists() and METADATA_FILE.exists():
+            try:
+                self.index = faiss.read_index(str(INDEX_FILE))
+
+                with open(METADATA_FILE, "r", encoding="utf-8") as file:
+                    self.metadata = json.load(file)
+
+                logger.info("FAISS index loaded: %s vectors", self.index.ntotal,)
+
+            except Exception as exc:
+                logger.error("Failed to load FAISS index: %s", exc,)
+                self.index = None
+                self.metadata = []
+
+    def _save(self):
+        """
+        Persist FAISS index and metadata to disk.
+        """
+
+        if self.index is not None:
+            faiss.write_index(self.index, str(INDEX_FILE))
+
+            with open(METADATA_FILE, "w", encoding="utf-8") as file:
+                json.dump(self.metadata, file, indent=4, ensure_ascii=False,)
+
+    def initialize(self, dimension):
+        """
+        Create an empty FAISS index.
+
+        We use IndexFlatIP because embeddings will be normalized, making inner product equivalent to cosine similarity.
+        """
+
+        if self.index is None:
+            self.index = faiss.IndexFlatIP(dimension)
+            self.metadata = []
+
+            self._save()
+
+            logger.info("Create new FAISS index with dimension %s", dimension)
+
+    def add_embeddings(self, embeddings, document_id, filename, chunks,):
+        """
+        Add document chunk embeddings to the FAISS.
+
+        Each embedding is associated with metadata containing the document ID, filename, and chunk text.
+        """
+
+        if not embeddings:
+            return
+
+        vectors = np.asarray(embeddings, dtype="float32")
+
+        if vectors.ndim != 2:
+            raise ValueError("Embeddings must be a 2-dimensional array")
+
+        faiss.normalize_L2(vectors)
+
+        dimension = vectors.shape[1]
+
+        self.initialize(dimension)
+
+        if self.index.d != dimension:
+            raise ValueError(
+                f"Embedding dimension mismatch. "
+                f"Existing index: {self.index.d}, "
+                f"New embeddings: {dimension}"
+            )
+
+        self.index.add(vectors)
+
+        start_index = len(self.metadata)
+
+        for chunk_index, chunk in enumerate(chunks):
+            self.metadata.append(
+                {
+                    "vector_id": start_index + chunk_index,
+                    "document_id": document_id,
+                    "filename": filename,
+                    "chunk_index": chunk_index,
+                    "text": chunk,
+                }
+            )
+
+        self._save()
+
+        logger.info(
+            "Added %s chunks for document %s", len(chunks), document_id
+        )
+
+    def search(self, query_embedding, top_k=5):
+        """"
+        Search the most relevant chunks
+        """
+
+        if self.index is None or self.index.ntotal == 0:
+            return []
+
+        query_vector = np.asarray([query_embedding], dtype="float32")
+
+        faiss.normalize_L2(query_vector)
+
+        k = min(top_k, self.index.ntotal)
+
+        scores, indices = self.index.search(query_vector, k)
+
+        results = []
+
+        for score, index in zip(scores[0], indices[0]):
+            if index < 0:
+                continue
+
+            if index >= len(self.metadata):
+                continue
+
+            metadata = self.metadata[index].copy()
+
+            metadata["score"] = float(score)
+
+            results.append(metadata)
+
+        return results
+
+faiss_service = FAISSService()
+
+
+
+
+
+
