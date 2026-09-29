@@ -1,0 +1,306 @@
+//backend / ocr_reader.py
+import fitz
+from rapidocr_onnxruntime import RapidOCR
+import os
+import logging
+
+engine = RapidOCR()
+logger = logging.getLogger("uvicorn.error")
+
+
+def read_scanned_pdf(pdf_path):
+   doc = fitz.open(pdf_path)
+   # Initialize before the loop
+   full_text = ""
+   for page_num in range(len(doc)):
+       page = doc.load_page(page_num)
+       pix = page.get_pixmap(dpi=150)
+       image_path = f"temp_page_{page_num}.png"
+       pix.save(image_path)
+       result, _ = engine(image_path)
+       page_text = ""
+       if result:
+           for item in result:
+               page_text += item[1] + " "
+       logger.info("--- OCR Page %s ---", page_num + 1)
+       logger.info("%s", page_text if page_text.strip() else "[No OCR text on this page]")
+
+       full_text += page_text + "\n"
+       if os.path.exists(image_path):
+           os.remove(image_path)
+   return full_text
+
+//backend / pdf_reader.py
+from pypdf import PdfReader
+import logging
+
+
+logger = logging.getLogger("uvicorn.error")
+
+def read_pdf(file_path):
+    reader = PdfReader(file_path)
+
+    logger.info("Total pages in PDF: %s", len(reader.pages))
+
+    text = ""
+
+    for i, page in enumerate(reader.pages):
+        page_text = page.extract_text()
+        logger.info("--- Page %s ---", i + 1)
+        if page_text and page_text.strip():
+            logger.info("%s", page_text)
+        else:
+            logger.info("[No extractable text on this page]")
+        
+        if page_text:
+            text += page_text + "\n"
+
+    return text
+
+//backend / requirements.txt
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aiosignal==1.4.0
+annotated-doc==0.0.4
+annotated-types==0.8.0
+anyio==4.14.2
+attrs==26.1.0
+bcrypt==5.0.0
+build==1.5.0
+certifi==2026.7.22
+cffi==2.1.0
+charset-normalizer==3.4.9
+click==8.4.2
+colorama==0.4.6
+cryptography==50.0.0
+distro==1.9.0
+durationpy==0.10
+faiss-cpu==1.14.3
+fastapi==0.140.7
+filelock==3.32.2
+flatbuffers==25.12.19
+frozenlist==1.8.0
+fsspec==2026.7.0
+google-api-core==2.33.0
+google-api-python-client==2.198.0
+google-auth==2.56.2
+google-auth-httplib2==0.4.0
+googleapis-common-protos==1.75.0
+greenlet==3.5.4
+grpcio==1.83.0
+grpcio-status==1.71.2
+h11==0.16.0
+hf-xet==1.5.2
+httpcore==1.0.9
+httplib2==0.32.0
+httptools==0.8.0
+httpx==0.28.1
+httpx-sse==0.4.3
+huggingface_hub==1.26.0
+idna==3.18
+importlib_resources==7.1.0
+Jinja2==3.1.6
+jiter==0.16.0
+joblib==1.5.3
+jsonpatch==1.33
+jsonpointer==3.1.1
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+kubernetes==36.0.3
+langchain==1.3.14
+langchain-classic==1.0.8
+langchain-community==0.4.2
+langchain-core==1.5.1
+langchain-openai==1.4.1
+langchain-protocol==0.0.18
+langchain-text-splitters==1.1.2
+langgraph==1.2.9
+langgraph-checkpoint==4.1.1
+langgraph-prebuilt==1.1.0
+langgraph-sdk==0.4.2
+langsmith==0.10.10
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+mdurl==0.1.2
+mmh3==5.2.1
+mpmath==1.3.0
+multidict==6.7.1
+narwhals==2.24.0
+networkx==3.6.1
+numpy==2.5.1
+oauthlib==3.3.1
+onnxruntime==1.28.0
+openai==2.49.0
+opencv-python==5.0.0.93
+opentelemetry-api==1.44.0
+opentelemetry-exporter-otlp-proto-common==1.44.0
+opentelemetry-exporter-otlp-proto-grpc==1.44.0
+opentelemetry-proto==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-semantic-conventions==0.65b0
+orjson==3.11.9
+ormsgpack==1.12.2
+overrides==7.7.0
+packaging==26.2
+pillow==12.3.0
+propcache==0.5.2
+proto-plus==1.28.2
+pyasn1==0.6.4
+pyasn1_modules==0.4.2
+pybase64==1.4.3
+pyclipper==1.4.0
+pycparser==3.0
+pydantic==2.13.4
+pydantic-settings==2.14.2
+pydantic_core==2.46.4
+Pygments==2.20.0
+PyJWT==2.13.0
+pymupdf==1.28.0
+pyparsing==3.3.2
+pypdf==6.14.2
+PyPika==0.51.1
+pyproject_hooks==1.2.0
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.2
+python-multipart==0.0.32
+PyYAML==6.0.3
+rapidocr-onnxruntime==1.4.4
+referencing==0.37.0
+regex==2026.7.19
+requests==2.34.2
+requests-oauthlib==2.0.0
+requests-toolbelt==1.0.0
+rich==15.0.0
+rpds-py==2026.6.3
+safetensors==0.8.0
+scikit-learn==1.9.0
+scipy==1.18.0
+sentence-transformers==5.7.0
+setuptools==84.0.0
+shapely==2.1.2
+shellingham==1.5.4
+six==1.17.0
+sniffio==1.3.1
+SQLAlchemy==2.0.51
+starlette==1.3.1
+sympy==1.14.0
+tenacity==9.1.4
+threadpoolctl==3.6.0
+tiktoken==0.13.0
+tokenizers==0.22.2
+torch==2.13.0
+tqdm==4.70.0
+transformers==5.15.0
+typer==0.27.0
+typing-inspection==0.4.2
+typing_extensions==4.16.0
+uritemplate==4.2.0
+urllib3==2.7.0
+uuid_utils==0.17.0
+uvicorn==0.51.0
+watchfiles==1.2.0
+websocket-client==1.9.0
+websockets==15.0.1
+xxhash==3.8.1
+yarl==1.24.5
+zstandard==0.25.0
+google-genai==2.22.0
+protobuf==5.29.6
+
+//backend / test_faiss.py
+from services.vector_store import vector_store
+
+print("\n========== FAISS TEST ==========\n")
+# 1. Test adding a document
+document_id = "test-document-001"
+filename = "test.pdf"
+chunks = [
+   "Mahindra is an Indian multinational automotive manufacturing company.",
+   "The company manufactures automobiles, commercial vehicles and tractors.",
+   "Mahindra was founded in 1945.",
+]
+print("Adding test document...")
+added = vector_store.add_document(
+   document_id=document_id,
+   filename=filename,
+   chunks=chunks,
+)
+print(f"Chunks added: {added}")
+
+# 2. Check total vectors
+total_vectors = vector_store.get_total_vector_count()
+print(f"Total vectors in FAISS: {total_vectors}")
+
+# 3. Test similarity search
+query = "When was Mahindra founded?"
+print(f"\nSearching for: {query}")
+results = vector_store.search(
+   query=query,
+   top_k=3,
+)
+
+# 4. Display results
+print("\n========== SEARCH RESULTS ==========\n")
+for index, result in enumerate(results, start=1):
+   print(f"Result {index}")
+   print(f"Score: {result['score']:.4f}")
+   print(f"Filename: {result['filename']}")
+   print(f"Chunk index: {result['chunk_index']}")
+   print(f"Text: {result['text']}")
+   print("-" * 60)
+
+# 5. Delete test document
+print("\nDeleting test document...")
+deleted = vector_store.delete_document(document_id)
+print(f"Vectors deleted: {deleted}")
+print(
+   f"Total vectors after deletion: "
+   f"{vector_store.get_total_vector_count()}"
+)
+print("\n========== FAISS TEST COMPLETE ==========\n")
+
+//backend / test_gemini_api.py
+import os
+from dotenv import load_dotenv
+from google import genai
+load_dotenv()
+api_key = os.getenv("GEMINI_API_KEY")
+if not api_key:
+   raise RuntimeError("GEMINI_API_KEY is not set")
+client = genai.Client(api_key=api_key)
+response = client.models.generate_content(
+   model="gemini-3.6-flash",
+   contents="Reply with exactly: Gemini API test successful"
+)
+print(response.text)
+
+//backend / test_secret.py
+from google.cloud import secretmanager
+
+PROJECT_ID = "506214303692"
+SECRET_ID = "GEMINI_API_KEY"
+VERSION_ID = "latest"
+
+def get_gemini_api_key():
+    client = secretmanager.SecretManagerServiceClient()
+
+    secret_version_name = (
+        f"projects/{PROJECT_ID}"
+        f"/secrets/{SECRET_ID}"
+        f"/versions/latest"
+    )
+
+    response = client.access_secret_version(
+        request={
+            "name": secret_version_name
+        }
+    )
+
+    return response.payload.data.decode("UTF-8").strip()
+
+if __name__ == "__main__":
+    api_key = get_gemini_api_key()
+
+    print("Secret Manager access: SUCCESS")
+    print(f"API key retrieved successfully. Length: {len(api_key)}")
+ 
