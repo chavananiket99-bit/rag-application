@@ -1,0 +1,1494 @@
+//frontend / src / pages / Dashboard.jsx
+import { useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { useAuth } from "../context/AuthContext";
+import {
+  AlertTriangle,
+  ArrowRight,
+  Bell,
+  Bot,
+  CalendarClock,
+  CheckCircle2,
+  FileText,
+  MessageSquare,
+  Search,
+  UploadCloud,
+  Activity,
+  Sparkles,
+  XCircle,
+} from "lucide-react";
+
+import { useUpload } from "../context/UploadContext";
+import UploadCard from "../components/UploadCard";
+
+const EXPIRY_NOTICE_DAYS = 30;
+
+function getDaysUntilExpiry(expiryDate) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const expiry = new Date(`${expiryDate}T00:00:00`);
+  return Math.round((expiry - today) / 86400000);
+}
+
+export default function Dashboard() {
+  const navigate = useNavigate();
+  const { user } = useAuth();
+  const [agreementView, setAgreementView] = useState("upcoming");
+  const agreementSectionRef = useRef(null);
+
+  const { uploadedFiles = [], messages = [], documentsLoading } = useUpload();
+
+  const documentCount = uploadedFiles.length;
+
+  const chatCount = messages.filter(
+    (message) => message.role === "user",
+  ).length;
+
+  const agreements = uploadedFiles.filter((document) => document.expiryDate);
+  const expiringAgreements = agreements
+    .filter((document) => {
+      const daysRemaining = getDaysUntilExpiry(document.expiryDate);
+      return daysRemaining >= 0 && daysRemaining <= EXPIRY_NOTICE_DAYS;
+    })
+    .sort((first, second) =>
+      first.expiryDate.localeCompare(second.expiryDate),
+    );
+  const expiredAgreements = agreements
+    .filter((document) => getDaysUntilExpiry(document.expiryDate) < 0)
+    .sort((first, second) =>
+      second.expiryDate.localeCompare(first.expiryDate),
+    );
+  const activeAgreements = agreements.filter(
+    (document) => getDaysUntilExpiry(document.expiryDate) >= 0,
+  );
+  const signatureReviewAgreements = agreements.filter((document) =>
+    ["Potentially Incomplete", "Not Detected"].includes(
+      document.analysis?.signature_status,
+    ),
+  );
+  const actualizationAgreements = agreements.filter(
+    (document) => document.analysis?.actualization_required,
+  );
+
+  const showAgreements = (view) => {
+    setAgreementView(view);
+    window.requestAnimationFrame(() => {
+      agreementSectionRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+  };
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto bg-slate-50">
+      <div className="mx-auto w-full max-w-7xl px-4 py-5 sm:px-6 sm:py-6 lg:px-8">
+        {/* =====================================================
+            HERO
+        ====================================================== */}
+        <section className="relative overflow-hidden rounded-2xl bg-slate-950 shadow-lg">
+          {/* Decorative background */}
+          <div className="pointer-events-none absolute -right-24 -top-24 h-72 w-72 rounded-full bg-red-700/20 blur-3xl" />
+
+          <div className="pointer-events-none absolute -bottom-32 left-1/3 h-72 w-72 rounded-full bg-red-700/10 blur-3xl" />
+
+          <div className="relative px-5 py-7 sm:px-8 sm:py-9 lg:px-10">
+            <div className="flex flex-col gap-7 lg:flex-row lg:items-center lg:justify-between">
+              {/* Hero content */}
+              <div className="max-w-3xl">
+                <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-slate-700 bg-slate-900/80 px-3 py-1.5">
+                  <Activity size={14} className="text-emerald-400" />
+
+                  <span className="text-xs font-medium text-slate-300">
+                    Enterprise AI Workspace
+                  </span>
+                </div>
+
+                <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl lg:text-4xl">
+                  Welcome back, {user?.name || "User"}
+                </h1>
+
+                <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400 sm:text-base">
+                  Your intelligent document knowledge workspace. Upload
+                  enterprise documents and use AI to find relevant information
+                  quickly.
+                </p>
+              </div>
+
+              {/* Chat CTA */}
+              <button
+                type="button"
+                onClick={() => navigate("/chat")}
+                className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-red-700 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-red-950/30 transition hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 focus:ring-offset-slate-950"
+              >
+                <Bot size={18} />
+                <span>Open AI Chat</span>
+                <ArrowRight size={17} />
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {expiringAgreements.length > 0 && (
+          <button
+            type="button"
+            onClick={() => showAgreements("upcoming")}
+            className="mt-5 flex w-full items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-left transition hover:border-amber-300 hover:bg-amber-100/70"
+          >
+            <Bell size={20} className="mt-0.5 shrink-0 text-amber-700" />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-amber-900">
+                {expiringAgreements.length} agreement
+                {expiringAgreements.length === 1 ? " is" : "s are"} nearing
+                expiry
+              </p>
+              <p className="mt-0.5 text-xs text-amber-800">
+                Review agreements expiring within the next {EXPIRY_NOTICE_DAYS}
+                days.
+              </p>
+            </div>
+            <ArrowRight size={17} className="mt-1 shrink-0 text-amber-700" />
+          </button>
+        )}
+
+        {/* =====================================================
+            STAT CARDS
+        ====================================================== */}
+        <section className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          <StatCard
+            label="Documents"
+            value={documentsLoading ? "—" : documentCount}
+            description="Uploaded knowledge sources"
+            icon={FileText}
+            iconClass="bg-red-50 text-red-700"
+          />
+
+          <StatCard
+            label="AI Conversations"
+            value={chatCount}
+            description="Questions asked in this session"
+            icon={MessageSquare}
+            iconClass="bg-blue-50 text-blue-600"
+          />
+
+          <StatCard
+            label="Expiring Soon"
+            value={expiringAgreements.length}
+            description={`Within ${EXPIRY_NOTICE_DAYS} days`}
+            icon={CalendarClock}
+            iconClass="bg-amber-50 text-amber-700"
+            onClick={() => showAgreements("upcoming")}
+          />
+
+          <StatCard
+            label="Expired Agreements"
+            value={expiredAgreements.length}
+            description="Click to review expired agreements"
+            icon={XCircle}
+            iconClass="bg-red-50 text-red-700"
+            onClick={() => showAgreements("expired")}
+          />
+
+          <StatCard
+            label="Active Agreements"
+            value={activeAgreements.length}
+            description="Click to review active agreements"
+            icon={CheckCircle2}
+            iconClass="bg-emerald-50 text-emerald-600"
+            onClick={() => showAgreements("active")}
+          />
+        </section>
+
+        <section
+          ref={agreementSectionRef}
+          className="enterprise-card mt-5 scroll-mt-5 overflow-hidden"
+        >
+          <div className="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="enterprise-section-title">Agreement Expiry</h2>
+              <p className="enterprise-section-description">
+                Monitor agreements that require attention.
+              </p>
+            </div>
+            <div className="flex rounded-lg bg-slate-100 p-1">
+              <AgreementViewButton
+                active={agreementView === "upcoming"}
+                onClick={() => setAgreementView("upcoming")}
+              >
+                Expiring soon ({expiringAgreements.length})
+              </AgreementViewButton>
+              <AgreementViewButton
+                active={agreementView === "expired"}
+                onClick={() => setAgreementView("expired")}
+              >
+                Expired ({expiredAgreements.length})
+              </AgreementViewButton>
+              <AgreementViewButton
+                active={agreementView === "active"}
+                onClick={() => setAgreementView("active")}
+              >
+                Active ({activeAgreements.length})
+              </AgreementViewButton>
+            </div>
+          </div>
+          <AgreementList
+            agreements={
+              agreementView === "expired"
+                ? expiredAgreements
+                : agreementView === "active"
+                  ? activeAgreements
+                  : expiringAgreements
+            }
+            view={agreementView}
+          />
+        </section>
+
+        <section className="enterprise-card mt-5 overflow-hidden">
+          <div className="border-b border-slate-100 px-5 py-4">
+            <h2 className="enterprise-section-title">Compliance Monitoring</h2>
+            <p className="enterprise-section-description">
+              Evidence extracted from indexed agreements.
+            </p>
+          </div>
+          <div className="grid gap-px bg-slate-100 sm:grid-cols-3">
+            <ComplianceMetric
+              label="Active agreements"
+              value={activeAgreements.length}
+              description="Based on extracted validity dates"
+              tone="emerald"
+            />
+            <ComplianceMetric
+              label="Signature review"
+              value={signatureReviewAgreements.length}
+              description="Missing or potentially incomplete evidence"
+              tone={signatureReviewAgreements.length ? "amber" : "emerald"}
+            />
+            <ComplianceMetric
+              label="Actualization actions"
+              value={actualizationAgreements.length}
+              description="Agreements containing actualization obligations"
+              tone={actualizationAgreements.length ? "amber" : "slate"}
+            />
+          </div>
+        </section>
+
+        {/* =====================================================
+            UPLOAD DOCUMENTS
+        ====================================================== */}
+        <section className="enterprise-card mt-5 p-5 sm:p-6">
+          <div className="mb-6 flex items-start gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-50">
+              <UploadCloud size={20} className="text-red-700" />
+            </div>
+
+            <div>
+              <h2 className="enterprise-section-title">Upload Documents</h2>
+
+              <p className="enterprise-section-description">
+                Add PDF documents to your enterprise AI knowledge base.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex justify-center">
+            <UploadCard />
+          </div>
+        </section>
+
+        {/* =====================================================
+            DOCUMENTS + QUICK ACTIONS
+        ====================================================== */}
+        <section className="mt-5 grid gap-5 lg:grid-cols-3">
+          {/* Recent Documents */}
+          <div className="enterprise-card overflow-hidden lg:col-span-2">
+            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+              <div>
+                <h2 className="enterprise-section-title">Recent Documents</h2>
+
+                <p className="enterprise-section-description">
+                  Documents currently available to the AI
+                </p>
+              </div>
+
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-50">
+                <FileText size={18} className="text-slate-500" />
+              </div>
+            </div>
+
+            <div className="p-3">
+              {documentsLoading ? (
+                <div className="px-3 py-10 text-center">
+                  <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl bg-slate-100">
+                    <Activity
+                      size={19}
+                      className="animate-pulse text-slate-400"
+                    />
+                  </div>
+
+                  <p className="mt-3 text-sm text-slate-400">
+                    Loading documents...
+                  </p>
+                </div>
+              ) : documentCount === 0 ? (
+                <EmptyDocuments />
+              ) : (
+                <div className="space-y-1">
+                  {uploadedFiles.slice(0, 5).map((document, index) => {
+                    const filename =
+                      document?.filename ||
+                      document?.name ||
+                      `Document ${index + 1}`;
+
+                    const documentKey =
+                      document?.id ||
+                      document?.filename ||
+                      document?.name ||
+                      index;
+
+                    return (
+                      <div
+                        key={documentKey}
+                        className="group flex items-center gap-3 rounded-xl px-3 py-3 transition hover:bg-slate-50"
+                      >
+                        {/* PDF icon */}
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-red-50">
+                          <FileText size={19} className="text-red-700" />
+                        </div>
+
+                        {/* Filename */}
+                        <div className="min-w-0 flex-1">
+                          <p
+                            className="truncate text-sm font-medium text-slate-700 group-hover:text-slate-900"
+                            title={filename}
+                          >
+                            {filename}
+                          </p>
+
+                          <p className="mt-0.5 text-xs text-slate-400">
+                            {document?.status || "Available for AI search"}
+                          </p>
+                        </div>
+
+                        {/* Status */}
+                        <div className="flex shrink-0 items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1">
+                          <CheckCircle2
+                            size={13}
+                            className="text-emerald-600"
+                          />
+
+                          <span className="hidden text-[10px] font-medium text-emerald-700 sm:inline">
+                            Ready
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* View all */}
+            {documentCount > 5 && (
+              <div className="border-t border-slate-100 px-5 py-3">
+                <button
+                  type="button"
+                  onClick={() => navigate("/chat")}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-red-700 transition hover:text-red-800"
+                >
+                  View all documents
+                  <ArrowRight size={14} />
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* =====================================================
+              QUICK ACTIONS
+          ====================================================== */}
+          <div className="enterprise-card overflow-hidden">
+            <div className="border-b border-slate-100 px-5 py-4">
+              <h2 className="enterprise-section-title">Quick Actions</h2>
+
+              <p className="enterprise-section-description">
+                Common workspace actions
+              </p>
+            </div>
+
+            <div className="space-y-2 p-4">
+              {/* Ask AI */}
+              <QuickAction
+                icon={Bot}
+                title="Ask AI"
+                description="Search your uploaded documents"
+                onClick={() => navigate("/chat")}
+                highlighted
+              />
+
+              {/* Search Knowledge */}
+              <QuickAction
+                icon={Search}
+                title="Search Knowledge"
+                description="Find information across documents"
+                onClick={() => navigate("/chat")}
+              />
+
+              {/* Upload */}
+              <QuickAction
+                icon={UploadCloud}
+                title="Upload Document"
+                description="Add another PDF to the knowledge base"
+                onClick={() => {
+                  document.querySelector('input[type="file"]')?.click();
+                }}
+              />
+            </div>
+          </div>
+        </section>
+
+        {/* =====================================================
+            HOW IT WORKS
+        ====================================================== */}
+        <section className="mt-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+          <div className="flex items-start gap-4">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-50">
+              <Sparkles size={20} className="text-red-700" />
+            </div>
+
+            <div>
+              <h2 className="enterprise-section-title">
+                How Enterprise AI works
+              </h2>
+
+              <p className="enterprise-section-description">
+                Your documents form the knowledge base used by the AI assistant.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <WorkflowStep
+              number="01"
+              title="Upload"
+              description="Upload enterprise PDF documents."
+            />
+
+            <WorkflowStep
+              number="02"
+              title="Process"
+              description="Documents are extracted and indexed."
+            />
+
+            <WorkflowStep
+              number="03"
+              title="Ask"
+              description="Ask natural-language questions."
+            />
+
+            <WorkflowStep
+              number="04"
+              title="Answer"
+              description="AI responds using document knowledge."
+            />
+          </div>
+        </section>
+
+        {/* Footer */}
+        <div className="py-6 text-center">
+          <p className="text-[11px] text-slate-400">
+            Mahindra Enterprise AI Knowledge Assistant
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =============================================================
+   STAT CARD
+============================================================= */
+
+function StatCard({
+  label,
+  value,
+  description,
+  icon: Icon,
+  iconClass,
+  onClick,
+}) {
+  const Component = onClick ? "button" : "div";
+
+  return (
+    <Component
+      type={onClick ? "button" : undefined}
+      onClick={onClick}
+      className={`enterprise-card p-5 text-left transition duration-200 hover:-translate-y-0.5 hover:shadow-md ${onClick ? "cursor-pointer focus:outline-none focus:ring-2 focus:ring-red-200" : ""}`}
+    >
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-xs font-medium uppercase tracking-wider text-slate-400">
+            {label}
+          </p>
+
+          <p className="mt-2 truncate text-2xl font-semibold text-slate-800 sm:text-3xl">
+            {value}
+          </p>
+
+          <p className="mt-1 text-xs text-slate-500">{description}</p>
+        </div>
+
+        <div
+          className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${iconClass}`}
+        >
+          <Icon size={21} />
+        </div>
+      </div>
+    </Component>
+  );
+}
+
+function AgreementViewButton({ active, onClick, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-md px-3 py-2 text-xs font-semibold transition ${
+        active
+          ? "bg-white text-slate-900 shadow-sm"
+          : "text-slate-500 hover:text-slate-800"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function AgreementList({ agreements, view }) {
+  const expired = view === "expired";
+
+  if (agreements.length === 0) {
+    return (
+      <div className="px-5 py-10 text-center">
+        <CheckCircle2 size={24} className="mx-auto text-emerald-600" />
+        <p className="mt-2 text-sm font-medium text-slate-700">
+          No {view === "active" ? "active" : expired ? "expired" : "nearing-expiry"} agreements
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="divide-y divide-slate-100">
+      {agreements.map((agreement) => {
+        const daysRemaining = getDaysUntilExpiry(agreement.expiryDate);
+        const urgency = expired
+          ? `Expired ${Math.abs(daysRemaining)} day${Math.abs(daysRemaining) === 1 ? "" : "s"} ago`
+          : daysRemaining === 0
+            ? "Expires today"
+            : `${daysRemaining} day${daysRemaining === 1 ? "" : "s"} remaining`;
+
+        return (
+          <div
+            key={agreement.id}
+            className="flex items-start gap-3 px-5 py-4"
+          >
+            <div
+              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${expired ? "bg-red-50" : "bg-amber-50"}`}
+            >
+              {expired ? (
+                <XCircle size={19} className="text-red-700" />
+              ) : (
+                <AlertTriangle size={19} className="text-amber-700" />
+              )}
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium text-slate-800">
+                {agreement.filename}
+              </p>
+              <p className="mt-0.5 text-xs text-slate-500">
+                Expiry: {formatExpiryDate(agreement.expiryDate)}
+              </p>
+              <p className="mt-1 text-xs leading-5 text-slate-400">
+                {agreement.analysis?.start_date
+                  ? `Start: ${formatExpiryDate(agreement.analysis.start_date)} · `
+                  : ""}
+                {agreement.analysis?.transaction_type || "Type not classified"}
+                {agreement.analysis?.signature_status
+                  ? ` · ${agreement.analysis.signature_status}`
+                  : ""}
+              </p>
+            </div>
+            <span
+              className={`shrink-0 text-right text-xs font-semibold ${expired ? "text-red-700" : "text-amber-700"}`}
+            >
+              {urgency}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function formatExpiryDate(expiryDate) {
+  return new Intl.DateTimeFormat("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(new Date(`${expiryDate}T00:00:00`));
+}
+
+function ComplianceMetric({ label, value, description, tone }) {
+  const toneClass = {
+    amber: "text-amber-700",
+    emerald: "text-emerald-700",
+    slate: "text-slate-700",
+  }[tone];
+
+  return (
+    <div className="bg-white px-5 py-4">
+      <p className="text-xs font-medium uppercase tracking-wider text-slate-400">
+        {label}
+      </p>
+      <p className={`mt-2 text-2xl font-semibold ${toneClass}`}>{value}</p>
+      <p className="mt-1 text-xs text-slate-500">{description}</p>
+    </div>
+  );
+}
+
+/* =============================================================
+   QUICK ACTION
+============================================================= */
+
+function QuickAction({
+  icon: Icon,
+  title,
+  description,
+  onClick,
+  highlighted = false,
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`
+        group flex w-full items-center gap-3 rounded-xl border p-3 text-left
+        transition
+        ${
+          highlighted
+            ? "border-red-100 bg-red-50/50 hover:border-red-200 hover:bg-red-50"
+            : "border-slate-200 hover:border-red-200 hover:bg-red-50/40"
+        }
+      `}
+    >
+      <div
+        className={`
+          flex h-10 w-10 shrink-0 items-center justify-center rounded-lg
+          ${highlighted ? "bg-red-100" : "bg-slate-100 group-hover:bg-red-50"}
+        `}
+      >
+        <Icon
+          size={19}
+          className={
+            highlighted
+              ? "text-red-700"
+              : "text-slate-600 group-hover:text-red-700"
+          }
+        />
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium text-slate-700">{title}</p>
+
+        <p className="mt-0.5 truncate text-xs text-slate-400">{description}</p>
+      </div>
+
+      <ArrowRight
+        size={16}
+        className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-red-600"
+      />
+    </button>
+  );
+}
+
+/* =============================================================
+   EMPTY DOCUMENTS
+============================================================= */
+
+function EmptyDocuments() {
+  return (
+    <div className="px-3 py-10 text-center">
+      <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-slate-100">
+        <FileText size={21} className="text-slate-400" />
+      </div>
+
+      <p className="mt-3 text-sm font-medium text-slate-700">
+        No documents yet
+      </p>
+
+      <p className="mx-auto mt-1 max-w-xs text-xs leading-5 text-slate-400">
+        Upload a PDF to build your enterprise AI knowledge base.
+      </p>
+    </div>
+  );
+}
+
+/* =============================================================
+   WORKFLOW STEP
+============================================================= */
+
+function WorkflowStep({ number, title, description }) {
+  return (
+    <div className="rounded-xl border border-slate-100 bg-slate-50 p-4 transition hover:border-red-100 hover:bg-red-50/30">
+      <span className="text-[10px] font-bold tracking-wider text-red-700">
+        {number}
+      </span>
+
+      <h3 className="mt-2 text-sm font-semibold text-slate-700">{title}</h3>
+
+      <p className="mt-1 text-xs leading-5 text-slate-400">{description}</p>
+    </div>
+  );
+}
+
+//frontend / src / pages / Home.jsx
+export default function Home() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-slate-950">
+      <h1 className="text-5xl font-bold text-white">Home Page</h1>
+    </div>
+  );
+}
+
+//frontend / src / pages / Login.jsx
+import { useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import {
+  AlertCircle,
+  ArrowRight,
+  Eye,
+  EyeOff,
+  LockKeyhole,
+  LogIn,
+  ShieldCheck,
+  UserRound,
+} from "lucide-react";
+import { useAuth } from "../context/AuthContext";
+export default function Login() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { login, loginWithSSO } = useAuth();
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [ssoLoading, setSsoLoading] = useState(false);
+  const [error, setError] = useState("");
+  const redirectPath = location.state?.from || "/dashboard";
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    if (loading || ssoLoading) {
+      return;
+    }
+    setError("");
+    setLoading(true);
+    try {
+      await login({
+        username,
+        password,
+      });
+      navigate(redirectPath, {
+        replace: true,
+      });
+    } catch (err) {
+      setError(
+        err?.message || "Unable to sign in. Please check your credentials.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSSO = async () => {
+    if (loading || ssoLoading) {
+      return;
+    }
+    setError("");
+    setSsoLoading(true);
+
+    try {
+      await loginWithSSO();
+    } catch (err) {
+      setError(err?.message || "SSO sign-in is currently unavailable.");
+    } finally {
+      setSsoLoading(false);
+    }
+  };
+  return (
+    <div className="min-h-dvh bg-slate-950 tracking-[0.015em] lg:h-dvh lg:overflow-hidden">
+      <div className="grid min-h-dvh lg:h-full lg:min-h-0 lg:grid-cols-[1.1fr_0.9fr]">
+        {/* Left branding panel */}
+        <div className="relative hidden overflow-hidden lg:flex">
+          <div className="absolute inset-0 bg-slate-950" />
+          <div className="absolute -left-32 top-20 h-96 w-96 rounded-full bg-red-700/20 blur-3xl" />
+          <div className="absolute bottom-0 right-0 h-96 w-96 rounded-full bg-red-700/10 blur-3xl" />
+          <div className="relative flex w-full flex-col justify-between p-10 xl:p-12">
+            <div className="flex items-center gap-4">
+              <div className="flex items-center justify-center">
+                <img
+                  src="/mahindra-logo.png"
+                  alt="Mahindra"
+                  className="object-contain w-[200px]"
+                />
+              </div>
+              {/* <div>
+                <p className="text-sm font-semibold text-white">AI</p>
+                <p className="text-xs text-slate-500">Knowledge Portal</p>
+              </div> */}
+            </div>
+            <div className="max-w-xl">
+              <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-900/80 px-3 py-1.5">
+                <ShieldCheck size={14} className="text-emerald-400" />
+                <span className="text-xs font-medium text-slate-300">
+                  Enterprise Knowledge Workspace
+                </span>
+              </div>
+              <h1 className="text-4xl font-semibold tracking-tight text-white xl:text-5xl">
+                Your enterprise knowledge,
+                <span className="text-red-500"> with AI.</span>
+              </h1>
+              <p className="mt-5 max-w-lg text-sm leading-7 text-slate-400">
+                Upload enterprise documents, ask questions in natural language,
+                and get AI-assisted answers grounded in your organization's
+                knowledge.
+              </p>
+            </div>
+            <p className="text-xs text-slate-600">
+              Secure enterprise AI workspace
+            </p>
+          </div>
+        </div>
+        {/* Login panel */}
+        <div className="flex items-center justify-center bg-slate-100 px-5 py-5 sm:px-8 lg:h-full lg:min-h-0">
+          <div className="w-full max-w-md">
+            {/* Mobile branding */}
+            <div className="mb-8 flex items-center gap-3 lg:hidden">
+              <div className="flex items-center justify-center">
+                <img
+                  src="/mahindra-logo.png"
+                  alt="Mahindra"
+                  className="object-contain w-[150px]"
+                />
+              </div>
+              {/* <div>
+                <p className="text-sm font-semibold text-slate-800">
+                  AI
+                </p>
+                <p className="text-xs text-slate-500">Knowledge Portal</p>
+              </div> */}
+            </div>
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xl sm:p-7">
+              <div className="mb-5">
+                <h2 className="text-2xl font-semibold tracking-tight text-slate-900">
+                  Welcome back
+                </h2>
+                <p className="mt-2 text-sm leading-6 text-slate-500">
+                  Sign in to access your AI knowledge workspace.
+                </p>
+              </div>
+              {error && (
+                <div className="mb-5 flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3.5 py-3 text-sm text-red-700">
+                  <AlertCircle size={17} className="mt-0.5 shrink-0" />
+                  <span>{error}</span>
+                </div>
+              )}
+              {/* SSO */}
+              <button
+                type="button"
+                onClick={handleSSO}
+                disabled={loading || ssoLoading}
+                className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {ssoLoading ? (
+                  <>
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-700" />
+                    Connecting to SSO...
+                  </>
+                ) : (
+                  <>
+                    <ShieldCheck size={18} />
+                    Continue with Corporate SSO
+                  </>
+                )}
+              </button>
+              {/* Divider */}
+              <div className="my-4 flex items-center gap-3">
+                <div className="h-px flex-1 bg-slate-200" />
+                <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
+                  or sign in with account
+                </span>
+                <div className="h-px flex-1 bg-slate-200" />
+              </div>
+              <form onSubmit={handleSubmit} className="space-y-3">
+                {/* Username */}
+                <div>
+                  <label
+                    htmlFor="username"
+                    className="mb-1.5 block text-xs font-semibold text-slate-700"
+                  >
+                    Username
+                  </label>
+                  <div className="relative">
+                    <UserRound
+                      size={17}
+                      className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+                    />
+                    <input
+                      id="username"
+                      type="text"
+                      autoComplete="username"
+                      value={username}
+                      onChange={(event) => setUsername(event.target.value)}
+                      placeholder="Enter your username"
+                      disabled={loading || ssoLoading}
+                      className="w-full rounded-xl border border-slate-300 bg-white py-3 pl-10 pr-3 text-sm text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-red-400 focus:ring-2 focus:ring-red-100 disabled:bg-slate-50"
+                    />
+                  </div>
+                </div>
+                {/* Password */}
+                <div>
+                  <label
+                    htmlFor="password"
+                    className="mb-1.5 block text-xs font-semibold text-slate-700"
+                  >
+                    Password
+                  </label>
+                  <div className="relative">
+                    <LockKeyhole
+                      size={17}
+                      className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+                    />
+                    <input
+                      id="password"
+                      type={showPassword ? "text" : "password"}
+                      autoComplete="current-password"
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                      placeholder="Enter your password"
+                      disabled={loading || ssoLoading}
+                      className="w-full rounded-xl border border-slate-300 bg-white py-3 pl-10 pr-11 text-sm text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-red-400 focus:ring-2 focus:ring-red-100 disabled:bg-slate-50"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((value) => !value)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                      aria-label={
+                        showPassword ? "Hide password" : "Show password"
+                      }
+                    >
+                      {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+                    </button>
+                  </div>
+                </div>
+                <button
+                  type="submit"
+                  disabled={
+                    loading || ssoLoading || !username.trim() || !password
+                  }
+                  className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-red-700 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-red-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+                >
+                  {loading ? (
+                    <>
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                      Signing in...
+                    </>
+                  ) : (
+                    <>
+                      <LogIn size={18} />
+                      Sign in
+                      <ArrowRight size={17} />
+                    </>
+                  )}
+                </button>
+              </form>
+              <div className="mt-4 rounded-xl bg-slate-50 px-3.5 py-2.5 text-xs leading-5 text-slate-500">
+                <strong className="font-semibold text-slate-600">
+                  Development logins:
+                </strong>
+                <ul className="mt-1 space-y-0.5">
+                  <li>
+                    <strong>demo</strong> / <strong>demo123</strong>
+                  </li>
+                  <li>
+                    <strong>user1</strong> / <strong>user1@123</strong>
+                  </li>
+                  <li>
+                    <strong>user2</strong> / <strong>user2@123</strong>
+                  </li>
+                </ul>
+              </div>
+            </div>
+            <p className="mt-3 text-center text-[11px] text-slate-400">
+              Authorized users only
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+//frontend / src / routes / AppRoutes.jsx
+import { BrowserRouter, Navigate, Routes, Route } from "react-router-dom";
+
+import Login from "../pages/Login";
+import Dashboard from "../pages/Dashboard";
+import Chat from "../pages/Chat";
+
+import MainLayout from "../layouts/MainLayout";
+import ProtectedRoute from "../components/ProtectedRoute";
+
+export default function AppRoutes() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<Navigate to="/login" replace />} />
+        <Route path="/login" element={<Login />} />
+        <Route
+          path="/dashboard"
+          element={
+            <ProtectedRoute>
+              <MainLayout>
+                <Dashboard />
+              </MainLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/chat"
+          element={
+            <ProtectedRoute>
+              <MainLayout>
+                <Chat />
+              </MainLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    </BrowserRouter>
+  );
+}
+
+//frontend / src / services / api.js
+import axios from "axios";
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+const api = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 120000,
+});
+const UPLOAD_TIMEOUT_MS = 60 * 60 * 1000;
+api.interceptors.request.use(
+  (config) => {
+    try {
+      const savedAuth = localStorage.getItem("rag_auth");
+      if (savedAuth) {
+        const auth = JSON.parse(savedAuth);
+        if (auth?.accessToken) {
+          config.headers.Authorization = `Bearer ${auth.accessToken}`;
+        }
+      }
+    } catch (error) {
+      console.error("Failed to attach authentication token:", error);
+    }
+    return config;
+  },
+  (error) => Promise.reject(error),
+);
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error?.response?.status === 401) {
+      localStorage.removeItem("rag_auth");
+      window.location.href = "/login";
+    }
+    return Promise.reject(error);
+  },
+);
+export async function uploadPdf(
+  files,
+  agreementMetadata = [],
+  onUploadProgress = undefined,
+) {
+  const formData = new FormData();
+  Array.from(files).forEach((file) => {
+    formData.append("files", file);
+  });
+  formData.append("agreement_metadata", JSON.stringify(agreementMetadata));
+  // Scanned PDFs go through OCR at roughly 12s per page, far beyond the default timeout.
+  const response = await api.post("/upload", formData, {
+    timeout: UPLOAD_TIMEOUT_MS,
+    onUploadProgress,
+  });
+  return response.data;
+}
+export async function getDocuments() {
+  const response = await api.get("/documents");
+  return response.data;
+}
+export async function askQuestion(question, conversationId = null) {
+  const response = await api.post("/ask", {
+    question,
+    conversation_id: conversationId,
+  });
+  return response.data;
+}
+export async function deleteDocument(documentId) {
+  const response = await api.delete(`/documents/${documentId}`);
+  return response.data;
+}
+export async function getConversations() {
+  const response = await api.get("/conversations");
+  return response.data;
+}
+export async function getConversation(conversationId) {
+  const response = await api.get(`/conversations/${conversationId}`);
+  return response.data;
+}
+export async function deleteConversation(conversationId) {
+  const response = await api.delete(`/conversations/${conversationId}`);
+  return response.data;
+}
+export { API_BASE_URL };
+
+//frontend / src / App.css
+.counter {
+  font-size: 16px;
+  padding: 5px 10px;
+  border-radius: 5px;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 2px solid transparent;
+  transition: border-color 0.3s;
+  margin-bottom: 24px;
+
+  &:hover {
+    border-color: var(--accent-border);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+.hero {
+  position: relative;
+
+  .base,
+  .framework,
+  .vite {
+    inset-inline: 0;
+    margin: 0 auto;
+  }
+
+  .base {
+    width: 170px;
+    position: relative;
+    z-index: 0;
+  }
+
+  .framework,
+  .vite {
+    position: absolute;
+  }
+
+  .framework {
+    z-index: 1;
+    top: 34px;
+    height: 28px;
+    transform: perspective(2000px) rotateZ(300deg) rotateX(44deg) rotateY(39deg)
+      scale(1.4);
+  }
+
+  .vite {
+    z-index: 0;
+    top: 107px;
+    height: 26px;
+    width: auto;
+    transform: perspective(2000px) rotateZ(300deg) rotateX(40deg) rotateY(39deg)
+      scale(0.8);
+  }
+}
+
+#center {
+  display: flex;
+  flex-direction: column;
+  gap: 25px;
+  place-content: center;
+  place-items: center;
+  flex-grow: 1;
+
+  @media (max-width: 1024px) {
+    padding: 32px 20px 24px;
+    gap: 18px;
+  }
+}
+
+#next-steps {
+  display: flex;
+  border-top: 1px solid var(--border);
+  text-align: left;
+
+  & > div {
+    flex: 1 1 0;
+    padding: 32px;
+    @media (max-width: 1024px) {
+      padding: 24px 20px;
+    }
+  }
+
+  .icon {
+    margin-bottom: 16px;
+    width: 22px;
+    height: 22px;
+  }
+
+  @media (max-width: 1024px) {
+    flex-direction: column;
+    text-align: center;
+  }
+}
+
+#docs {
+  border-right: 1px solid var(--border);
+
+  @media (max-width: 1024px) {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+#next-steps ul {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  gap: 8px;
+  margin: 32px 0 0;
+
+  .logo {
+    height: 18px;
+  }
+
+  a {
+    color: var(--text-h);
+    font-size: 16px;
+    border-radius: 6px;
+    background: var(--social-bg);
+    display: flex;
+    padding: 6px 12px;
+    align-items: center;
+    gap: 8px;
+    text-decoration: none;
+    transition: box-shadow 0.3s;
+
+    &:hover {
+      box-shadow: var(--shadow);
+    }
+    .button-icon {
+      height: 18px;
+      width: 18px;
+    }
+  }
+
+  @media (max-width: 1024px) {
+    margin-top: 20px;
+    flex-wrap: wrap;
+    justify-content: center;
+
+    li {
+      flex: 1 1 calc(50% - 8px);
+    }
+
+    a {
+      width: 100%;
+      justify-content: center;
+      box-sizing: border-box;
+    }
+  }
+}
+
+#spacer {
+  height: 88px;
+  border-top: 1px solid var(--border);
+  @media (max-width: 1024px) {
+    height: 48px;
+  }
+}
+
+.ticks {
+  position: relative;
+  width: 100%;
+
+  &::before,
+  &::after {
+    content: '';
+    position: absolute;
+    top: -4.5px;
+    border: 5px solid transparent;
+  }
+
+  &::before {
+    left: 0;
+    border-left-color: var(--border);
+  }
+  &::after {
+    right: 0;
+    border-right-color: var(--border);
+  }
+}
+
+//frontend / src / App.jsx
+import AppRoutes from "./routes/AppRoutes";
+
+export default function App() {
+  return <AppRoutes />;
+}
+
+//frontend / src / index.css
+@import "tailwindcss";
+
+html,
+body,
+#root {
+  font-family: "Georama-Regular";
+  letter-spacing: 0.03rem;
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #f8fafc;
+  color: #1e293b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.enterprise-card {
+  @apply rounded-2xl border border-slate-200 bg-white shadow-sm;
+}
+.enterprise-card-hover {
+  @apply transition duration-200 hover:-translate-y-0.5 hover:shadow-md;
+}
+.enterprise-button-primary {
+  @apply inline-flex items-center justify-center gap-2 rounded-xl bg-red-700 px-5 py-3 text-sm font-semibold text-white transition hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50;
+}
+.enterprise-button-secondary {
+  @apply inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-5 py-3 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50;
+}
+.enterprise-input {
+  @apply rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-red-500 focus:ring-2 focus:ring-red-100;
+}
+.enterprise-section-title {
+  @apply text-sm font-semibold text-slate-800;
+}
+.enterprise-section-description {
+  @apply mt-1 text-xs leading-5 text-slate-400;
+}
+
+//frontend / src / main.jsx
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+
+import "./index.css";
+import App from "./App.jsx";
+
+import { UploadProvider } from "./context/UploadContext.jsx";
+import { AuthProvider } from "./context/AuthContext.jsx";
+
+createRoot(document.getElementById("root")).render(
+  <StrictMode>
+    <AuthProvider>
+      <UploadProvider>
+        <App />
+      </UploadProvider>
+    </AuthProvider>
+  </StrictMode>,
+);
+
+//frontend / index.html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link
+      rel="stylesheet"
+      href="https://fontsstorage.blob.core.windows.net/html/css/georama.css"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>frontend</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+
+//frontend / package.json
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "axios": "^1.18.1",
+    "framer-motion": "^12.43.0",
+    "lucide-react": "^1.28.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-dropzone": "^19.1.1",
+    "react-icons": "^5.7.0",
+    "react-router-dom": "^7.18.2",
+    "tailwindcss": "^4.3.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "eslint": "^10.6.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.3",
+    "globals": "^17.7.0",
+    "vite": "^8.1.1"
+  }
+}
+
+//frontend / vite.config.js
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
+
+// https://vite.dev/config/
+export default defineConfig({
+  plugins: [react(), tailwindcss()],
+});
+
+
+
+
+
+
+
+
+
