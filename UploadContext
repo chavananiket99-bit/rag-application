@@ -1,0 +1,245 @@
+import { useAuth } from "../context/AuthContext";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  useCallback,
+} from "react";
+import {
+  getDocuments,
+  getConversations,
+  getConversation,
+  deleteConversation,
+} from "../services/api";
+const UploadContext = createContext();
+/*
+ * Convert backend documents into one standard frontend format.
+ */
+function normalizeDocument(doc, index = 0) {
+  if (!doc) return null;
+  // Backend document
+  if (typeof doc === "object") {
+    return {
+      id:
+        doc.id ||
+        doc.file_id ||
+        doc.filename ||
+        doc.name ||
+        `document-${index}`,
+      filename: doc.filename || doc.name || "Unnamed document",
+      status: doc.status || "Indexed",
+      agreementType: doc.agreement_type || null,
+      expiryDate: doc.expiry_date || null,
+      uploadedAt: doc.uploaded_at || null,
+      analysis: doc.analysis || null,
+    };
+  }
+  // Fallback for string filenames
+  if (typeof doc === "string") {
+    return {
+      id: doc,
+      filename: doc,
+      status: "Indexed",
+    };
+  }
+  return null;
+}
+function normalizeDocuments(documents) {
+  if (!Array.isArray(documents)) {
+    return [];
+  }
+  return documents
+    .map((doc, index) => normalizeDocument(doc, index))
+    .filter(Boolean);
+}
+/*
+ * Cached data is stored per user so switching accounts never
+ * shows another user's documents or messages.
+ */
+function storageKey(name, userId) {
+  return `${name}:${userId || "guest"}`;
+}
+function readStorage(name, userId, fallback) {
+  try {
+    const saved = localStorage.getItem(storageKey(name, userId));
+    return saved ? JSON.parse(saved) : fallback;
+  } catch (error) {
+    console.error(`Failed to restore ${name}:`, error);
+    return fallback;
+  }
+}
+export function UploadProvider({ children }) {
+  const { isAuthenticated, user } = useAuth();
+  const userId = user?.id || "guest";
+
+  const [uploadedFiles, setUploadedFiles] = useState(() =>
+    normalizeDocuments(readStorage("uploadedFiles", userId, [])),
+  );
+  const [messages, setMessages] = useState(() =>
+    readStorage("messages", userId, []),
+  );
+  const [conversationId, setConversationId] = useState(() =>
+    readStorage("conversationId", userId, null),
+  );
+  const [loading, setLoading] = useState(false);
+  const [typing, setTyping] = useState(false);
+  const [currentConversation, setCurrentConversation] = useState(null);
+  const [documentsLoading, setDocumentsLoading] = useState(false);
+  const [conversations, setConversations] = useState([]);
+  const [conversationsLoading, setConversationsLoading] = useState(false);
+  /*
+   * Load documents from backend.
+   */
+  const refreshDocuments = useCallback(async () => {
+    try {
+      setDocumentsLoading(true);
+      const data = await getDocuments();
+      const backendDocuments = data?.documents || [];
+      const normalizedDocuments = normalizeDocuments(backendDocuments);
+      setUploadedFiles(normalizedDocuments);
+    } catch (error) {
+      console.error("Failed to load documents from backend:", error);
+    } finally {
+      setDocumentsLoading(false);
+    }
+  }, []);
+  /*
+   * Load previous sessions for the logged-in user.
+   */
+  const refreshConversations = useCallback(async () => {
+    try {
+      setConversationsLoading(true);
+      const data = await getConversations();
+      setConversations(data?.conversations || []);
+    } catch (error) {
+      console.error("Failed to load conversation history:", error);
+    } finally {
+      setConversationsLoading(false);
+    }
+  }, []);
+  /*
+   * Open a previous session in the chat window.
+   */
+  const loadConversation = useCallback(async (targetConversationId) => {
+    if (!targetConversationId) return;
+    try {
+      setLoading(true);
+      const data = await getConversation(targetConversationId);
+      setMessages(data?.messages || []);
+      setConversationId(targetConversationId);
+    } catch (error) {
+      console.error("Failed to open conversation:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+  /*
+   * Remove a previous session.
+   */
+  const removeConversation = useCallback(async (targetConversationId) => {
+    if (!targetConversationId) return;
+    try {
+      await deleteConversation(targetConversationId);
+      setConversations((prev) =>
+        prev.filter((item) => item.id !== targetConversationId),
+      );
+      setConversationId((prev) => {
+        if (prev === targetConversationId) {
+          setMessages([]);
+          return null;
+        }
+        return prev;
+      });
+    } catch (error) {
+      console.error("Failed to delete conversation:", error);
+    }
+  }, []);
+  const startNewConversation = useCallback(() => {
+    setMessages([]);
+    setConversationId(null);
+  }, []);
+  /*
+   * Reload cached state whenever the signed-in user changes.
+   */
+  const [lastUserId, setLastUserId] = useState(userId);
+  if (lastUserId !== userId) {
+    setLastUserId(userId);
+    setUploadedFiles(
+      normalizeDocuments(readStorage("uploadedFiles", userId, [])),
+    );
+    setMessages(readStorage("messages", userId, []));
+    setConversationId(readStorage("conversationId", userId, null));
+    setConversations([]);
+  }
+  /*
+   * Persist uploaded documents.
+   */
+  useEffect(() => {
+    localStorage.setItem(
+      storageKey("uploadedFiles", userId),
+      JSON.stringify(uploadedFiles),
+    );
+  }, [uploadedFiles, userId]);
+  /*
+   * Persist chat messages.
+   */
+  useEffect(() => {
+    localStorage.setItem(
+      storageKey("messages", userId),
+      JSON.stringify(messages),
+    );
+  }, [messages, userId]);
+  /*
+   * Persist the active session id.
+   */
+  useEffect(() => {
+    localStorage.setItem(
+      storageKey("conversationId", userId),
+      JSON.stringify(conversationId),
+    );
+  }, [conversationId, userId]);
+  /*
+   * Load backend documents and history when the user signs in.
+   */
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setUploadedFiles([]);
+      setConversations([]);
+      return;
+    }
+    refreshDocuments();
+    refreshConversations();
+  }, [isAuthenticated, userId, refreshDocuments, refreshConversations]);
+  return (
+    <UploadContext.Provider
+      value={{
+        uploadedFiles,
+        setUploadedFiles,
+        messages,
+        setMessages,
+        loading,
+        setLoading,
+        typing,
+        setTyping,
+        currentConversation,
+        setCurrentConversation,
+        documentsLoading,
+        refreshDocuments,
+        conversationId,
+        setConversationId,
+        conversations,
+        conversationsLoading,
+        refreshConversations,
+        loadConversation,
+        removeConversation,
+        startNewConversation,
+      }}
+    >
+      {children}
+    </UploadContext.Provider>
+  );
+}
+export function useUpload() {
+  return useContext(UploadContext);
+}
