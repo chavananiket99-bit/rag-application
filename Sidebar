@@ -1,0 +1,326 @@
+import { useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import {
+  LayoutDashboard,
+  Bot,
+  FileText,
+  Loader2,
+  ChevronRight,
+  ChevronDown,
+  History,
+  MessageSquare,
+  Plus,
+  Trash2,
+  X,
+} from "lucide-react";
+import { useUpload } from "../context/UploadContext";
+
+function formatTimestamp(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export default function Sidebar({ mobileOpen = false, onClose }) {
+  const {
+    uploadedFiles,
+    documentsLoading,
+    conversations = [],
+    conversationsLoading,
+    conversationId,
+    loadConversation,
+    removeConversation,
+    startNewConversation,
+  } = useUpload();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [documentsOpen, setDocumentsOpen] = useState(true);
+  const [historyOpen, setHistoryOpen] = useState(true);
+  const isActive = (path) => location.pathname === path;
+
+  const openConversation = async (id) => {
+    await loadConversation(id);
+    if (location.pathname !== "/chat") {
+      navigate("/chat");
+    }
+    onClose?.();
+  };
+
+  const handleNewChat = () => {
+    startNewConversation();
+    if (location.pathname !== "/chat") {
+      navigate("/chat");
+    }
+    onClose?.();
+  };
+
+  return (
+    <>
+      {/* Mobile overlay */}
+      {mobileOpen && (
+        <button
+          type="button"
+          aria-label="Close navigation"
+          onClick={onClose}
+          className="fixed inset-0 z-40 bg-slate-950/50 backdrop-blur-sm md:hidden"
+        />
+      )}
+      {/* Sidebar */}
+      <aside
+        className={`
+         fixed inset-y-0 left-0 z-50 flex w-64 flex-col
+         border-r border-slate-800 bg-slate-950 text-slate-300
+         shadow-2xl transition-transform duration-300
+         md:static md:z-auto md:h-screen md:w-60
+         md:translate-x-0 md:shadow-none
+         ${mobileOpen ? "translate-x-0" : "-translate-x-full"}
+       `}
+      >
+        {/* Brand */}
+        <div className="flex h-16 shrink-0 items-center justify-between border-b border-slate-800 px-5">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center justify-center">
+              <img
+                src="/mahindra-logo.png"
+                alt="Mahindra"
+                className="object-contain w-[150px]"
+              />
+            </div>
+          </div>
+          {/* Mobile close */}
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg p-2 text-slate-500 hover:bg-slate-900 hover:text-white md:hidden"
+            aria-label="Close navigation"
+          >
+            <X size={19} />
+          </button>
+        </div>
+        {/* Workspace */}
+        <div className="shrink-0 px-3 py-5">
+          <p className="mb-3 px-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-600">
+            Workspace
+          </p>
+          <nav className="space-y-1">
+            <Link
+              to="/dashboard"
+              onClick={onClose}
+              className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
+                isActive("/dashboard")
+                  ? "bg-red-700 text-white shadow-sm"
+                  : "text-slate-400 hover:bg-slate-900 hover:text-white"
+              }`}
+            >
+              <LayoutDashboard size={18} />
+              <span>Dashboard</span>
+              {isActive("/dashboard") && (
+                <ChevronRight size={16} className="ml-auto" />
+              )}
+            </Link>
+            <Link
+              to="/chat"
+              onClick={onClose}
+              className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
+                isActive("/chat")
+                  ? "bg-red-700 text-white shadow-sm"
+                  : "text-slate-400 hover:bg-slate-900 hover:text-white"
+              }`}
+            >
+              <Bot size={18} />
+              <span>AI Chat</span>
+              {isActive("/chat") && (
+                <ChevronRight size={16} className="ml-auto" />
+              )}
+            </Link>
+          </nav>
+        </div>
+        {/* Collapsible panels */}
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
+          {/* Documents */}
+          <button
+            type="button"
+            onClick={() => setDocumentsOpen((open) => !open)}
+            aria-expanded={documentsOpen}
+            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left transition hover:bg-slate-900"
+          >
+            {documentsOpen ? (
+              <ChevronDown size={14} className="text-slate-500" />
+            ) : (
+              <ChevronRight size={14} className="text-slate-500" />
+            )}
+            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+              Documents
+            </span>
+            {!documentsLoading && (
+              <span className="ml-auto rounded-full bg-slate-900 px-2 py-0.5 text-[10px] text-slate-400">
+                {uploadedFiles.length}
+              </span>
+            )}
+          </button>
+          {documentsOpen && (
+            <div className="mt-2">
+              {documentsLoading && (
+                <div className="flex items-center gap-2 px-3 py-3 text-xs text-slate-500">
+                  <Loader2 size={15} className="animate-spin" />
+                  <span>Loading documents...</span>
+                </div>
+              )}
+              {!documentsLoading && uploadedFiles.length === 0 && (
+                <div className="mx-1 rounded-xl border border-dashed border-slate-800 px-3 py-5 text-center">
+                  <FileText size={22} className="mx-auto mb-2 text-slate-600" />
+                  <p className="text-xs text-slate-600">No documents uploaded</p>
+                </div>
+              )}
+              {!documentsLoading && uploadedFiles.length > 0 && (
+                <div className="space-y-1">
+                  {uploadedFiles.map((document, index) => {
+                    const filename =
+                      document?.filename ||
+                      document?.name ||
+                      `Document ${index + 1}`;
+                    return (
+                      <div
+                        key={
+                          document?.id ||
+                          document?.filename ||
+                          document?.name ||
+                          index
+                        }
+                        className="group flex items-center gap-3 rounded-xl px-3 py-2.5 transition hover:bg-slate-900"
+                        title={filename}
+                      >
+                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-red-950/50">
+                          <FileText size={16} className="text-red-500" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-xs font-medium text-slate-300 group-hover:text-white">
+                            {filename}
+                          </p>
+                          <p className="mt-0.5 text-[10px] text-slate-600">
+                            {document?.status || "Indexed"}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+          {/* History */}
+          <button
+            type="button"
+            onClick={() => setHistoryOpen((open) => !open)}
+            aria-expanded={historyOpen}
+            className="mt-4 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left transition hover:bg-slate-900"
+          >
+            {historyOpen ? (
+              <ChevronDown size={14} className="text-slate-500" />
+            ) : (
+              <ChevronRight size={14} className="text-slate-500" />
+            )}
+            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+              History
+            </span>
+            {!conversationsLoading && (
+              <span className="ml-auto rounded-full bg-slate-900 px-2 py-0.5 text-[10px] text-slate-400">
+                {conversations.length}
+              </span>
+            )}
+          </button>
+          {historyOpen && (
+            <div className="mt-2">
+              <button
+                type="button"
+                onClick={handleNewChat}
+                className="mb-2 flex w-full items-center gap-2 rounded-xl border border-slate-800 px-3 py-2 text-xs font-medium text-slate-400 transition hover:border-red-800 hover:bg-slate-900 hover:text-white"
+              >
+                <Plus size={14} />
+                <span>New chat</span>
+              </button>
+              {conversationsLoading && (
+                <div className="flex items-center gap-2 px-3 py-3 text-xs text-slate-500">
+                  <Loader2 size={15} className="animate-spin" />
+                  <span>Loading history...</span>
+                </div>
+              )}
+              {!conversationsLoading && conversations.length === 0 && (
+                <div className="mx-1 rounded-xl border border-dashed border-slate-800 px-3 py-5 text-center">
+                  <History size={22} className="mx-auto mb-2 text-slate-600" />
+                  <p className="text-xs text-slate-600">No previous sessions</p>
+                </div>
+              )}
+              {!conversationsLoading && conversations.length > 0 && (
+                <div className="space-y-1">
+                  {conversations.map((session) => {
+                    const selected = session.id === conversationId;
+                    return (
+                      <div
+                        key={session.id}
+                        className={`group flex items-center gap-2 rounded-xl px-3 py-2.5 transition ${
+                          selected ? "bg-slate-900" : "hover:bg-slate-900"
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => openConversation(session.id)}
+                          className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                          title={session.title}
+                        >
+                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-900 group-hover:bg-slate-800">
+                            <MessageSquare
+                              size={15}
+                              className="text-slate-400"
+                            />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p
+                              className={`truncate text-xs font-medium ${
+                                selected ? "text-white" : "text-slate-300"
+                              }`}
+                            >
+                              {session.title || "Conversation"}
+                            </p>
+                            <p className="mt-0.5 text-[10px] text-slate-600">
+                              {formatTimestamp(session.updated_at)}
+                              {session.message_count
+                                ? ` · ${session.message_count} Q&A`
+                                : ""}
+                            </p>
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removeConversation(session.id)}
+                          className="shrink-0 rounded-lg p-1.5 text-slate-600 opacity-0 transition hover:bg-red-950/50 hover:text-red-400 group-hover:opacity-100"
+                          aria-label="Delete session"
+                          title="Delete session"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        {/* Footer */}
+        <div className="shrink-0 border-t border-slate-800 px-5 py-4">
+          <p className="text-[10px] uppercase tracking-wider text-slate-600">
+            Mahindra Enterprise AI
+          </p>
+          <p className="mt-1 text-[10px] text-slate-700">Knowledge Assistant</p>
+        </div>
+      </aside>
+    </>
+  );
+}
