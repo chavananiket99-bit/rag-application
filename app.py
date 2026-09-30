@@ -22,6 +22,7 @@ import logging
 import uuid
 import re
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 from pathlib import Path
 
@@ -763,6 +764,129 @@ def home():
 # UPLOAD
 # ============================================================
 
+
+# ============================================================
+# UPLOAD PERFORMANCE HELPERS
+# ============================================================
+# Document extraction is blocking work (PDF parsing / OCR / local
+# agreement analysis). Keep concurrency bounded so multiple files can
+# be prepared in parallel without creating an unbounded CPU/RAM load.
+MAX_PARALLEL_DOCUMENT_PROCESSING = max(
+    1,
+    min(
+        int(os.getenv("RAG_MAX_PARALLEL_DOCUMENTS", "2")),
+        (os.cpu_count() or 2),
+    ),
+)
+
+
+def _prepare_uploaded_document(job):
+    """
+    Prepare one uploaded document without touching shared metadata/FAISS.
+
+    This function is intentionally isolated from document_manager and
+    vector_store because those are shared persistent resources. The
+    expensive PDF/OCR/chunk/agreement-analysis work can safely happen
+    concurrently; persistence/indexing is performed later in a controlled
+    sequential phase.
+    """
+    filename = job["filename"]
+    file_path = job["file_path"]
+    expiry_date = job.get("expiry_date")
+    agreement_type = job.get("agreement_type")
+
+    started_at = time.perf_counter()
+
+    logger.info(
+        "[UPLOAD-PREP] Started | file=%s",
+        filename,
+    )
+
+    try:
+        extraction_started = time.perf_counter()
+
+        result = extract_text(str(file_path))
+
+        text = result.get("text", "")
+        pages = result.get("pages", [])
+        chunks = result.get("chunks", [])
+        ocr_used = result.get("ocr_used", False)
+
+        extraction_seconds = time.perf_counter() - extraction_started
+
+        logger.info(
+            "[UPLOAD-PREP] Extraction completed | file=%s | "
+            "seconds=%.2f | characters=%s | pages=%s | chunks=%s | OCR=%s",
+            filename,
+            extraction_seconds,
+            len(text),
+            len(pages),
+            len(chunks),
+            ocr_used,
+        )
+
+        if not chunks:
+            raise ValueError(
+                "No text chunks could be extracted from the PDF."
+            )
+
+        analysis_started = time.perf_counter()
+
+        if not expiry_date:
+            expiry_date = extract_agreement_expiry(text)
+
+        if expiry_date and not agreement_type:
+            agreement_type = "Agreement"
+
+        agreement_analysis = analyze_agreement(
+            text,
+            expiry_override=expiry_date,
+        )
+
+        if agreement_analysis.get("expiry_date"):
+            expiry_date = agreement_analysis["expiry_date"]
+            agreement_type = agreement_type or "Agreement"
+
+        analysis_seconds = time.perf_counter() - analysis_started
+        total_seconds = time.perf_counter() - started_at
+
+        logger.info(
+            "[UPLOAD-PREP] Ready for indexing | file=%s | "
+            "analysis_seconds=%.2f | total_seconds=%.2f",
+            filename,
+            analysis_seconds,
+            total_seconds,
+        )
+
+        return {
+            "success": True,
+            "job": job,
+            "text": text,
+            "pages": pages,
+            "chunks": chunks,
+            "ocr_used": ocr_used,
+            "expiry_date": expiry_date,
+            "agreement_type": agreement_type,
+            "agreement_analysis": agreement_analysis,
+            "prep_seconds": total_seconds,
+        }
+
+    except Exception as exc:
+        total_seconds = time.perf_counter() - started_at
+        logger.exception(
+            "[UPLOAD-PREP] Failed | file=%s | seconds=%.2f",
+            filename,
+            total_seconds,
+        )
+
+        return {
+            "success": False,
+            "job": job,
+            "error": str(exc),
+            "prep_seconds": total_seconds,
+        }
+
+
 @app.post("/upload")
 async def upload_files(
     files: Annotated[
@@ -777,14 +901,33 @@ async def upload_files(
         get_current_user
     ),
 ):
+    """
+    Upload multiple PDFs using a two-phase pipeline:
+
+    Phase 1 (parallel):
+        physical file is already saved -> PDF extraction/OCR -> chunking
+        -> agreement analysis.
+
+    Phase 2 (controlled):
+        document metadata + FAISS persistence/indexing.
+
+    Shared persistent resources are intentionally not modified from worker
+    threads. This preserves the existing document isolation and FAISS
+    consistency guarantees while allowing expensive per-document work to
+    overlap.
+    """
+
+    request_started = time.perf_counter()
 
     logger.info(
-        "Multiple upload request received. Files: %s",
-        len(files)
+        "Multiple upload request received. Files: %s | max_parallel=%s",
+        len(files),
+        MAX_PARALLEL_DOCUMENT_PROCESSING,
     )
 
     uploaded_documents = []
     failed_documents = []
+    prepared_jobs = []
 
     user_id = current_user["id"]
 
@@ -806,14 +949,19 @@ async def upload_files(
             detail="Agreement metadata must be a list.",
         )
 
-    for file_index, file in enumerate(files):
+    # ============================================================
+    # PHASE 0 — SAVE ALL PHYSICAL FILES
+    # ============================================================
+    save_started = time.perf_counter()
 
+    for file_index, file in enumerate(files):
         metadata = (
             parsed_agreement_metadata[file_index]
             if file_index < len(parsed_agreement_metadata)
             and isinstance(parsed_agreement_metadata[file_index], dict)
             else {}
         )
+
         expiry_date = metadata.get("expiry_date") or None
         agreement_type = metadata.get("agreement_type") or None
 
@@ -830,302 +978,292 @@ async def upload_files(
                 ) from exc
 
         original_filename = Path(
-            file.filename
-            or "uploaded_file.pdf"
+            file.filename or "uploaded_file.pdf"
         ).name
 
-        stored_filename = None
-        file_path = None
-        document = None
-
-        logger.info(
-            "Processing uploaded file: %s",
-            original_filename
-        )
+        unique_id = uuid.uuid4().hex
+        stored_filename = f"{unique_id}_{original_filename}"
+        file_path = UPLOAD_FOLDER / stored_filename
 
         try:
+            file_started = time.perf_counter()
 
-            # ====================================================
-            # SAVE PHYSICAL FILE
-            # ====================================================
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
 
-            unique_id = (
-                uuid.uuid4().hex
-            )
-
-            stored_filename = (
-                f"{unique_id}_{original_filename}"
-            )
-
-            file_path = (
-                UPLOAD_FOLDER
-                / stored_filename
-            )
-
-            with open(
-                file_path,
-                "wb"
-            ) as buffer:
-
-                shutil.copyfileobj(
-                    file.file,
-                    buffer
-                )
-
-            file_size = (
-                os.path.getsize(
-                    file_path
-                )
-            )
+            file_size = os.path.getsize(file_path)
 
             logger.info(
-                "File saved: %s | bytes=%s",
+                "[UPLOAD-SAVE] Saved | file=%s | bytes=%s | seconds=%.2f",
                 original_filename,
-                file_size
+                file_size,
+                time.perf_counter() - file_started,
             )
 
-            # ====================================================
-            # EXTRACT PDF
-            # ====================================================
-
-            result = extract_text(
-                str(file_path)
-            )
-
-            text = result.get(
-                "text",
-                ""
-            )
-
-            pages = result.get(
-                "pages",
-                []
-            )
-
-            chunks = result.get(
-                "chunks",
-                []
-            )
-
-            ocr_used = result.get(
-                "ocr_used",
-                False
-            )
-
-            logger.info(
-                "Text extraction completed: %s | "
-                "Characters=%s | Pages=%s | "
-                "Chunks=%s | OCR=%s",
-                original_filename,
-                len(text),
-                len(pages),
-                len(chunks),
-                ocr_used,
-            )
-
-            if not chunks:
-
-                raise ValueError(
-                    "No text chunks could be extracted "
-                    "from the PDF."
-                )
-
-            if not expiry_date:
-                expiry_date = extract_agreement_expiry(
-                    text
-                )
-
-            if expiry_date and not agreement_type:
-                agreement_type = "Agreement"
-
-            agreement_analysis = analyze_agreement(
-                text,
-                expiry_override=expiry_date,
-            )
-
-            if agreement_analysis.get("expiry_date"):
-                expiry_date = agreement_analysis["expiry_date"]
-                agreement_type = agreement_type or "Agreement"
-
-            # ====================================================
-            # CREATE DOCUMENT METADATA
-            # ====================================================
-
-            document = (
-                document_manager.add_document(
-                    filename=original_filename,
-                    filesize=file_size,
-                    stored_filename=stored_filename,
-                    user_id=user_id,
-                    agreement_type=agreement_type,
-                    expiry_date=expiry_date,
-                    analysis=agreement_analysis,
-                )
-            )
-
-            # ====================================================
-            # ADD TO FAISS
-            # ====================================================
-
-            faiss_chunks_added = (
-                vector_store.add_document(
-                    document_id=document["id"],
-                    filename=original_filename,
-                    chunks=chunks,
-                    user_id=user_id,
-                )
-            )
-
-            if (
-                faiss_chunks_added
-                != len(chunks)
-            ):
-
-                raise RuntimeError(
-                    "FAISS indexing did not add "
-                    "all document chunks."
-                )
-
-            logger.info(
-                "FAISS indexing completed: %s | chunks=%s",
-                original_filename,
-                faiss_chunks_added
-            )
-
-            # ====================================================
-            # SUCCESS
-            # ====================================================
-
-            uploaded_documents.append(
+            prepared_jobs.append(
                 {
-                    "document":
-                        document,
-
-                    "characters":
-                        len(text),
-
-                    "pages":
-                        len(pages),
-
-                    "chunks":
-                        len(chunks),
-
-                    "faiss_chunks_added":
-                        faiss_chunks_added,
-
-                    "ocr_used":
-                        ocr_used,
-
-                    "preview":
-                        text[:500],
+                    "index": file_index,
+                    "filename": original_filename,
+                    "stored_filename": stored_filename,
+                    "file_path": file_path,
+                    "file_size": file_size,
+                    "expiry_date": expiry_date,
+                    "agreement_type": agreement_type,
                 }
             )
 
         except Exception as exc:
-
             logger.exception(
-                "Failed to process file: %s",
-                original_filename
+                "[UPLOAD-SAVE] Failed | file=%s",
+                original_filename,
             )
 
-            # ====================================================
-            # ROLLBACK FAISS
-            # ====================================================
-
-            if document:
-
-                try:
-
-                    vector_store.delete_document(
-                        document["id"]
-                    )
-
-                except Exception:
-
-                    logger.exception(
-                        "FAISS rollback failed for %s",
-                        original_filename
-                    )
-
-                # ------------------------------------------------
-                # Roll back document metadata if possible.
-                # ------------------------------------------------
-
-                try:
-
-                    document_manager.delete_document(
-                        document["id"]
-                    )
-
-                except Exception:
-
-                    logger.exception(
-                        "Document metadata rollback failed "
-                        "for %s",
-                        original_filename
-                    )
-
-            # ====================================================
-            # ROLLBACK PHYSICAL FILE
-            # ====================================================
-
             try:
-
-                if (
-                    file_path
-                    and file_path.exists()
-                ):
-
+                if file_path.exists():
                     file_path.unlink()
-
-                    logger.info(
-                        "Rolled back physical file: %s",
-                        file_path
-                    )
-
             except Exception:
-
                 logger.exception(
-                    "Failed to remove incomplete file: %s",
-                    original_filename
+                    "Failed to remove partially saved file: %s",
+                    original_filename,
                 )
 
             failed_documents.append(
                 {
-                    "filename":
-                        original_filename,
-
-                    "error":
-                        str(exc),
+                    "filename": original_filename,
+                    "error": str(exc),
                 }
             )
 
     logger.info(
-        "Multiple upload completed. "
-        "Success=%s | Failed=%s",
+        "[UPLOAD-SAVE] Completed | files=%s | seconds=%.2f",
+        len(prepared_jobs),
+        time.perf_counter() - save_started,
+    )
+
+    # ============================================================
+    # PHASE 1 — PARALLEL PDF/OCR/ANALYSIS PREPARATION
+    # ============================================================
+    prep_started = time.perf_counter()
+    prepared_results = []
+
+    if prepared_jobs:
+        max_workers = min(
+            MAX_PARALLEL_DOCUMENT_PROCESSING,
+            len(prepared_jobs),
+        )
+
+        logger.info(
+            "[UPLOAD-PREP] Running parallel document preparation | "
+            "jobs=%s | workers=%s",
+            len(prepared_jobs),
+            max_workers,
+        )
+
+        with ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="document-prep",
+        ) as executor:
+            futures = [
+                executor.submit(
+                    _prepare_uploaded_document,
+                    job,
+                )
+                for job in prepared_jobs
+            ]
+
+            # Keep response ordering identical to the user's selected
+            # file order, even though workers complete independently.
+            for future in futures:
+                prepared_results.append(future.result())
+
+    logger.info(
+        "[UPLOAD-PREP] All parallel preparation completed | "
+        "seconds=%.2f",
+        time.perf_counter() - prep_started,
+    )
+
+    # ============================================================
+    # PHASE 2 — CONTROLLED METADATA + FAISS INDEXING
+    # ============================================================
+    indexing_started = time.perf_counter()
+
+    for result in prepared_results:
+        job = result["job"]
+        original_filename = job["filename"]
+        file_path = job["file_path"]
+        document = None
+
+        if not result.get("success"):
+            failed_documents.append(
+                {
+                    "filename": original_filename,
+                    "error": result.get(
+                        "error",
+                        "Document preparation failed.",
+                    ),
+                }
+            )
+
+            try:
+                if file_path.exists():
+                    file_path.unlink()
+            except Exception:
+                logger.exception(
+                    "Failed to remove failed prepared file: %s",
+                    original_filename,
+                )
+            continue
+
+        try:
+            text = result["text"]
+            pages = result["pages"]
+            chunks = result["chunks"]
+            ocr_used = result["ocr_used"]
+            expiry_date = result["expiry_date"]
+            agreement_type = result["agreement_type"]
+            agreement_analysis = result["agreement_analysis"]
+
+            logger.info(
+                "[UPLOAD-INDEX] Starting | file=%s | chunks=%s",
+                original_filename,
+                len(chunks),
+            )
+
+            # --------------------------------------------------------
+            # CREATE DOCUMENT METADATA
+            # --------------------------------------------------------
+            document = document_manager.add_document(
+                filename=original_filename,
+                filesize=job["file_size"],
+                stored_filename=job["stored_filename"],
+                user_id=user_id,
+                agreement_type=agreement_type,
+                expiry_date=expiry_date,
+                analysis=agreement_analysis,
+            )
+
+            # --------------------------------------------------------
+            # ADD TO FAISS
+            # --------------------------------------------------------
+            faiss_started = time.perf_counter()
+
+            faiss_chunks_added = vector_store.add_document(
+                document_id=document["id"],
+                filename=original_filename,
+                chunks=chunks,
+                user_id=user_id,
+            )
+
+            faiss_seconds = time.perf_counter() - faiss_started
+
+            if faiss_chunks_added != len(chunks):
+                raise RuntimeError(
+                    "FAISS indexing did not add all document chunks."
+                )
+
+            logger.info(
+                "[UPLOAD-INDEX] Completed | file=%s | chunks=%s | "
+                "seconds=%.2f",
+                original_filename,
+                faiss_chunks_added,
+                faiss_seconds,
+            )
+
+            uploaded_documents.append(
+                {
+                    "document": document,
+                    "characters": len(text),
+                    "pages": len(pages),
+                    "chunks": len(chunks),
+                    "faiss_chunks_added": faiss_chunks_added,
+                    "ocr_used": ocr_used,
+                    "preview": text[:500],
+                    "processing_seconds": round(
+                        result.get("prep_seconds", 0.0)
+                        + faiss_seconds,
+                        2,
+                    ),
+                }
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "[UPLOAD-INDEX] Failed | file=%s",
+                original_filename,
+            )
+
+            # ========================================================
+            # ROLLBACK FAISS
+            # ========================================================
+            if document:
+                try:
+                    vector_store.delete_document(
+                        document["id"]
+                    )
+                except Exception:
+                    logger.exception(
+                        "FAISS rollback failed for %s",
+                        original_filename,
+                    )
+
+                try:
+                    document_manager.delete_document(
+                        document["id"]
+                    )
+                except Exception:
+                    logger.exception(
+                        "Document metadata rollback failed for %s",
+                        original_filename,
+                    )
+
+            # ========================================================
+            # ROLLBACK PHYSICAL FILE
+            # ========================================================
+            try:
+                if file_path.exists():
+                    file_path.unlink()
+                    logger.info(
+                        "Rolled back physical file: %s",
+                        file_path,
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to remove incomplete file: %s",
+                    original_filename,
+                )
+
+            failed_documents.append(
+                {
+                    "filename": original_filename,
+                    "error": str(exc),
+                }
+            )
+
+    logger.info(
+        "[UPLOAD-INDEX] Completed | seconds=%.2f",
+        time.perf_counter() - indexing_started,
+    )
+
+    total_seconds = time.perf_counter() - request_started
+
+    logger.info(
+        "Multiple upload completed. Success=%s | Failed=%s | Total seconds=%.2f",
         len(uploaded_documents),
-        len(failed_documents)
+        len(failed_documents),
+        total_seconds,
     )
 
     return {
-
-        "message":
-            "Upload processing completed.",
-
-        "total_files":
-            len(files),
-
-        "successful_files":
-            len(uploaded_documents),
-
-        "failed_files":
-            len(failed_documents),
-
-        "documents":
-            uploaded_documents,
-
-        "failures":
-            failed_documents,
+        "message": "Upload processing completed.",
+        "total_files": len(files),
+        "successful_files": len(uploaded_documents),
+        "failed_files": len(failed_documents),
+        "documents": uploaded_documents,
+        "failures": failed_documents,
+        "performance": {
+            "total_seconds": round(total_seconds, 2),
+            "parallel_workers": MAX_PARALLEL_DOCUMENT_PROCESSING,
+        },
     }
 
 def _detect_question_intent(question):
