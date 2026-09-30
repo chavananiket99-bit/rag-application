@@ -1292,6 +1292,81 @@ def _is_strong_enough_result(
         or (semantic >= 0.40 and lexical >= 0.25)
     )
 
+def _deduplicate_retrieved_results(results):
+    """
+    Remove duplicate retrieved evidence while preserving
+    distinct chunks/pages from the same document.
+    Two results are considered duplicates when they point to
+    the same document, page and chunk.
+    Retrieval score is preserved by keeping the strongest
+    occurrence of each evidence location.
+    """
+    if not results:
+       return []
+   
+    
+    unique_results = {}
+    
+    for result in results:
+        if not result:
+            continue
+        
+        result_key = (
+            result.get("document_id"),
+            result.get("filename"),
+            result.get("page_number"),
+            result.get("chunk_index"),
+        )
+        
+        existing = unique_results.get(
+            result_key
+        )
+        
+        if existing is None:
+            unique_results[result_key] = result
+            continue
+        
+        existing_score = float(
+            existing.get(
+                "final_score",
+                0.0
+            )
+        )
+        
+        current_score = float(
+            result.get(
+                "final_score",
+                0.0
+            )
+        )
+
+        if current_score > existing_score:
+            unique_results[result_key] = result
+    
+    deduplicated_results = list(
+        unique_results.values()
+    )
+    
+    # Keep strongest evidence first.
+    deduplicated_results.sort(
+        key=lambda item: float(
+            item.get(
+                "final_score",
+                0.0
+            )
+        ),
+        reverse=True,
+    )
+    
+    logger.info(
+        "Evidence deduplication | "
+        "before=%s | after=%s | removed=%s",
+        len(results),
+        len(deduplicated_results),
+        len(results) - len(deduplicated_results),
+    )
+    return deduplicated_results
+
 # ============================================================
 # ASK
 # ============================================================
@@ -1879,7 +1954,7 @@ async def ask_question(
             question_intent
         )
     ]
-
+    
     if not strong_results:
         logger.warning(
             "No sufficiently strong evidence found | "
@@ -1887,7 +1962,7 @@ async def ask_question(
             question_intent,
             rewritten_question,
         )
-
+        
         return {
             "question": question,
             "answer":
@@ -1898,7 +1973,29 @@ async def ask_question(
                 conversation_id,
         }
     
-    results = strong_results
+    # ============================================================
+    # DEDUPLICATE RETRIEVED EVIDENCE
+    # ============================================================
+    results = _deduplicate_retrieved_results(
+        strong_results
+    )
+    
+    if not results:
+        logger.warning(
+            "No evidence remained after deduplication | "
+            "question=%s",
+            rewritten_question,
+        )
+        
+        return {
+            "question": question,
+            "answer":
+                "I couldn't find that information "
+                "in the uploaded document.",
+            "sources": [],
+            "conversation_id":
+                conversation_id,
+        }
 
     # ========================================================
     # LOG RETRIEVED RESULTS
