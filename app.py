@@ -1217,6 +1217,23 @@ def _detect_question_intent(question):
         "business justification",
     ]
 
+    summary_terms = [
+        "summary",
+        "summarize",
+        "summarise",
+        "summarized",
+        "summarised",
+        "overview",
+        "executive summary",
+        "key points",
+        "main points",
+        "highlights",
+        "give me a summary",
+        "provide a summary",
+        "brief summary",
+        "brief overview",
+    ]
+
     transaction_terms = [
         "transaction",
         "nature of transaction",
@@ -1272,6 +1289,12 @@ def _detect_question_intent(question):
         for term in purpose_terms
     ):
         return "purpose"
+
+    if any(
+            term in normalized
+            for term in summary_terms
+        ):
+            return "summary"
 
     if any(
         term in normalized
@@ -1463,6 +1486,13 @@ def _is_strong_enough_result(
             or lexical >= 1.0
             or (semantic >= 0.40 and lexical >= 0.25)
         )
+
+    if intent == "summary":
+       return (
+           relevance >= 0.10
+           or (semantic >= 0.30 and lexical >= 0.50)
+           or lexical >= 0.75
+       )
 
     if intent == "transaction":
         return (
@@ -2086,6 +2116,7 @@ async def ask_question(
         "lifecycle": 8,
         "commercial": 8,
         "purpose": 7,
+        "summary": 10,
         "transaction": 7,
         "actualization": 8,
         "general": 5,
