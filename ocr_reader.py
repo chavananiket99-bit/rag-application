@@ -2,12 +2,29 @@ import fitz
 import logging
 import os
 import tempfile
+import threading
 
 from rapidocr_onnxruntime import RapidOCR
 
 logger = logging.getLogger("uvicorn.error")
 
-engine = RapidOCR()
+# RapidOCR is kept thread-local because Phase 1 can process multiple
+# documents concurrently. A single shared OCR engine should not be
+# invoked concurrently by multiple worker threads.
+_engine_local = threading.local()
+
+
+def _get_ocr_engine():
+    engine = getattr(_engine_local, "engine", None)
+    if engine is None:
+        logger.info(
+            "Initializing RapidOCR engine for thread: %s",
+            threading.current_thread().name,
+        )
+        engine = RapidOCR()
+        _engine_local.engine = engine
+    return engine
+
 
 def read_scanned_pdf(pdf_path):
     """
@@ -64,7 +81,7 @@ def read_scanned_pdf(pdf_path):
                     temp_path
                 )
 
-                result, _ = engine(
+                result, _ = _get_ocr_engine()(
                     temp_path
                 )
 
