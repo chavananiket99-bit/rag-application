@@ -355,6 +355,200 @@ def _detect_explicit_document(
 
     return best_filename
 
+def _detect_explicit_documents(
+    question,
+    available_documents,
+):
+    """
+    Detect multiple explicitly referenced documents.
+    This is different from _detect_explicit_document(),
+    which intentionally returns only one document.
+    Example:
+        "Give me the summary of AD Inbound.pdf and AD Outbound.pdf"
+    Returns:
+        List of explicitly referenced filenames.
+    """
+    if not question:
+        return []
+    if not available_documents:
+        return []
+    candidates = []
+    
+    for filename in available_documents:
+        score = _document_reference_score(
+            question,
+            filename,
+        )
+        
+        if score < 0.40:
+            continue
+        
+        question_text = re.sub(
+            r"[^a-z0-9]+",
+            " ",
+            question.lower(),
+        ).strip()
+        
+        question_tokens = set(
+            question_text.split()
+        )
+        
+        filename_text = _normalize_document_name(
+            filename
+        )
+        
+        filename_tokens = set(
+            filename_text.split()
+        )
+        
+        # Apply the same aliases used by the
+        # single-document detector.
+        aliases = {
+            "wh": "warehouse",
+            "whs": "warehouse",
+            "warehouses": "warehouse",
+            "off": "office",
+            "offs": "office",
+            "offices": "office",
+            "out": "outbound",
+            "in": "inbound",
+        }
+        
+        question_tokens = {
+            aliases.get(
+                token,
+                token
+            )
+            for token in question_tokens
+        }
+        
+        filename_tokens = {
+            aliases.get(
+                token,
+                token
+            )
+            for token in filename_tokens
+        }
+        
+        generic_terms = {
+            "what",
+            "is",
+            "are",
+            "was",
+            "were",
+            "the",
+            "a",
+            "an",
+            "of",
+            "for",
+            "to",
+            "in",
+            "on",
+            "at",
+            "and",
+            "or",
+            "with",
+            "from",
+            "by",
+            "how",
+            "much",
+            "about",
+            "this",
+            "that",
+            "one",
+            "document",
+            "file",
+            "pdf",
+            "same",
+            "also",
+            "please",
+            "tell",
+            "me",
+        }
+        
+        question_tokens -= generic_terms
+        filename_tokens -= generic_terms
+        
+        overlap = (
+            question_tokens
+            .intersection(
+                filename_tokens
+            )
+        )
+        
+        if not overlap:
+            continue
+        
+        candidates.append(
+            {
+                "filename": filename,
+                "score": score,
+                "overlap": overlap,
+            }
+        )
+    
+    if not candidates:
+        return []
+    
+    # --------------------------------------------------------
+    # Remove candidates that are supported only by a
+    # generic/shared filename token.
+    #
+    # Example:
+    #
+    # Master Contract.pdf
+    # Vendor Contract.pdf
+    #
+    # Question:
+    # "Summarize the contract"
+    #
+    # Both contain "contract", but the question does not
+    # explicitly identify both documents.
+    # --------------------------------------------------------
+    if len(candidates) > 1:
+        unique_candidates = []
+        for candidate in candidates:
+            other_tokens = set()
+            for other in candidates:
+                if (
+                    other["filename"]
+                    == candidate["filename"]
+                ):
+                    continue
+                other_tokens.update(
+                    other["overlap"]
+                )
+            
+            unique_overlap = (
+                candidate["overlap"]
+                - other_tokens
+            )
+            
+            if unique_overlap:
+                unique_candidates.append(
+                    candidate
+                )
+        candidates = unique_candidates
+    
+    candidates.sort(
+        key=lambda item: item["score"],
+        reverse=True,
+    )
+    
+    detected_documents = [
+        item["filename"]
+        for item in candidates
+    ]
+    
+    if len(detected_documents) >= 2:
+        logger.info(
+            "Multiple explicit documents detected | "
+            "question=%s | documents=%s",
+            question,
+            detected_documents,
+        )
+    return detected_documents
+
 def _get_document_resolution_message(
     resolution
 ):
@@ -1701,49 +1895,122 @@ async def ask_question(
     # ========================================================
     # FINAL DOCUMENT RESOLUTION
     # ========================================================
-    
     resolved_filename = target_document
-
+    
     document_resolution = {
         "filename": resolved_filename,
         "score": 0.0,
         "ambiguous": False,
         "candidates": [],
     }
-
+    
+    # ========================================================
+    # DETECT EXPLICITLY NAMED DOCUMENTS
+    #
+    # This is important for questions such as:
+    #
+    # "Give me the summary of AD Inbound.pdf and AD Outbound.pdf"
+    #
+    # Such a question is a multi-document request even though
+    # it does not contain words like "compare" or "difference".
+    # ========================================================
+    explicit_documents = _detect_explicit_documents(
+        question=question,
+        available_documents=available_documents,
+    )
+    
+    # ========================================================
+    # COMPARISON / MULTI-DOCUMENT DETECTION
+    # ========================================================
     is_comparison_question = _is_comparison_question(
         rewritten_question
     )
-
     comparison_documents = set()
-    if is_comparison_question:
+    
+    # --------------------------------------------------------
+    # PRIORITY 1:
+    # Explicitly named multiple documents
+    # --------------------------------------------------------
+    if len(explicit_documents) >= 2:
+        comparison_documents = set(
+            explicit_documents
+        )
+        
+        logger.info(
+            "Multi-document request detected from "
+            "explicit document names | "
+            "documents=%s | question=%s",
+            sorted(comparison_documents),
+            question,
+        )
+    
+    # --------------------------------------------------------
+    # PRIORITY 2:
+    # Existing comparison detection
+    # --------------------------------------------------------
+    elif is_comparison_question:
         comparison_documents = (
             vector_store._detect_target_documents(
                 rewritten_question,
                 user_id=user_id,
             )
         )
-
-    if not resolved_filename:
-        document_resolution = vector_store.resolve_document(
-            rewritten_question,
-            user_id=user_id,
+    
+    # ========================================================
+    # NORMAL SINGLE-DOCUMENT RESOLUTION
+    #
+    # Only perform normal resolution when the question has not
+    # already identified multiple documents.
+    # ========================================================
+    if (
+        not resolved_filename
+        and len(comparison_documents) < 2
+    ):
+        document_resolution = (
+            vector_store.resolve_document(
+                rewritten_question,
+                user_id=user_id,
+            )
         )
-
+        
         resolved_filename = (
-            document_resolution.get("filename")
+            document_resolution.get(
+                "filename"
+            )
         )
-
+        
         if (
-            document_resolution.get("ambiguous")
+            document_resolution.get(
+                "ambiguous"
+            )
             and len(comparison_documents) < 2
         ):
             return {
                 "question": question,
-                "answer": _get_document_resolution_message(document_resolution),
+                "answer":
+                    _get_document_resolution_message(
+                        document_resolution
+                    ),
                 "sources": [],
-                "conversation_id": conversation_id,
+                "conversation_id":
+                    conversation_id,
             }
+    
+    # ========================================================
+    # MULTI-DOCUMENT REQUEST
+    #
+    # Do not assign one document as the resolved document.
+    # Retrieval below will search each explicitly identified
+    # document separately.
+    # ========================================================
+    if len(comparison_documents) >= 2:
+        resolved_filename = None
+        
+        logger.info(
+            "Multi-document retrieval mode enabled | "
+            "documents=%s",
+            sorted(comparison_documents),
+        )
 
     logger.info(
         "Final document resolution | "
