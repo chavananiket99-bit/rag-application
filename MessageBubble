@@ -1,0 +1,331 @@
+import { useState } from "react";
+
+import {
+
+  Bot,
+
+  User,
+
+  Copy,
+
+  Check,
+
+  ChevronDown,
+
+  ChevronRight,
+
+  RefreshCw,
+
+  AlertCircle,
+
+} from "lucide-react";
+
+export default function MessageBubble({
+
+  sender,
+
+  text,
+
+  sources = [],
+
+  isError = false,
+
+  onRetry,
+
+}) {
+
+  const [copied, setCopied] = useState(false);
+
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+
+  const isUser = sender === "user";
+
+  const handleCopy = async () => {
+
+    if (!text) return;
+
+    try {
+
+      await navigator.clipboard.writeText(text);
+
+      setCopied(true);
+
+      setTimeout(() => {
+
+        setCopied(false);
+
+      }, 1800);
+
+    } catch (error) {
+
+      console.error("Failed to copy answer:", error);
+
+    }
+
+  };
+
+  /*
+
+   * USER MESSAGE
+
+   */
+
+  if (isUser) {
+
+    return (
+<div className="flex justify-end">
+<div className="flex max-w-[85%] items-start gap-3 sm:max-w-[75%]">
+<div className="rounded-2xl rounded-tr-md bg-red-700 px-4 py-3 text-sm leading-6 text-white shadow-sm">
+
+            {text}
+</div>
+<div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-800">
+<User size={15} className="text-slate-400" />
+</div>
+</div>
+</div>
+
+    );
+
+  }
+
+  /*
+
+   * ASSISTANT MESSAGE
+
+   */
+
+  return (
+<div className="flex items-start gap-3">
+
+      {/* AI icon */}
+<div
+
+        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
+
+          isError ? "bg-red-950/60" : "bg-slate-800"
+
+        }`}
+>
+
+        {isError ? (
+<AlertCircle size={15} className="text-red-400" />
+
+        ) : (
+<Bot size={15} className="text-red-400" />
+
+        )}
+</div>
+
+      {/* Message content */}
+<div className="min-w-0 max-w-[85%] sm:max-w-[80%]">
+<div
+
+          className={`rounded-2xl rounded-tl-md border px-4 py-3 ${
+
+            isError
+
+              ? "border-red-900/60 bg-red-950/20"
+
+              : "border-slate-800 bg-slate-900/70"
+
+          }`}
+>
+
+          {/* Answer */}
+<div
+
+            className={`whitespace-pre-wrap text-sm leading-6 ${
+
+              isError ? "text-red-300" : "text-slate-300"
+
+            }`}
+>
+
+            {text}
+</div>
+
+          {/* =================================================
+
+              ACTIONS
+
+          ================================================== */}
+
+          {!isError && text && (
+<div className="mt-3 flex items-center gap-1 border-t border-slate-800 pt-2">
+<button
+
+                type="button"
+
+                onClick={handleCopy}
+
+                className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] text-slate-500 transition hover:bg-slate-800 hover:text-slate-200"
+
+                title="Copy answer"
+>
+
+                {copied ? (
+<>
+<Check size={13} />
+<span>Copied</span>
+</>
+
+                ) : (
+<>
+<Copy size={13} />
+<span>Copy</span>
+</>
+
+                )}
+</button>
+</div>
+
+          )}
+
+          {/* =================================================
+
+              RETRY
+
+          ================================================== */}
+
+          {isError && onRetry && (
+<div className="mt-3 border-t border-red-900/40 pt-3">
+<button
+
+                type="button"
+
+                onClick={onRetry}
+
+                className="flex items-center gap-2 rounded-lg border border-red-900/50 px-3 py-2 text-xs font-medium text-red-400 transition hover:bg-red-950/40 hover:text-red-300"
+>
+<RefreshCw size={13} />
+
+                Try again
+</button>
+</div>
+
+          )}
+</div>
+
+        {/* ===================================================
+
+            SOURCES
+
+        ==================================================== */}
+
+        {!isError && sources.length > 0 && (
+<div className="mt-2">
+<button
+
+              type="button"
+
+              onClick={() =>
+
+                setSourcesOpen((open) => !open)
+
+              }
+
+              className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-slate-500 transition hover:bg-slate-900 hover:text-slate-300"
+>
+
+              {sourcesOpen ? (
+<ChevronDown size={13} />
+
+              ) : (
+<ChevronRight size={13} />
+
+              )}
+<span>
+
+                Sources ({sources.length})
+</span>
+</button>
+
+            {sourcesOpen && (
+<div className="mt-2 space-y-2">
+
+                {sources.map((source, index) => {
+
+                  const filename =
+
+                    source?.filename ||
+
+                    source?.file_name ||
+
+                    source?.name ||
+
+                    `Source ${index + 1}`;
+
+                  const chunkIndex =
+
+                    source?.chunk_index ??
+
+                    source?.chunk ??
+
+                    null;
+
+                  const preview =
+
+                    source?.text ||
+
+                    source?.content ||
+
+                    source?.preview ||
+
+                    "";
+
+                  return (
+<div
+
+                      key={
+
+                        source?.id ||
+
+                        `${filename}-${chunkIndex}-${index}`
+
+                      }
+
+                      className="rounded-xl border border-slate-800 bg-slate-950/60 p-3"
+>
+<div className="flex items-start justify-between gap-3">
+<div className="min-w-0">
+<p className="truncate text-xs font-medium text-slate-300">
+
+                            {filename}
+</p>
+
+                          {chunkIndex !== null && (
+<p className="mt-0.5 text-[10px] text-slate-600">
+
+                              Chunk {chunkIndex}
+</p>
+
+                          )}
+</div>
+</div>
+
+                      {preview && (
+<p className="mt-2 line-clamp-3 text-[11px] leading-5 text-slate-500">
+
+                          {preview}
+</p>
+
+                      )}
+</div>
+
+                  );
+
+                })}
+</div>
+
+            )}
+</div>
+
+        )}
+</div>
+</div>
+
+  );
+
+}
+ 
