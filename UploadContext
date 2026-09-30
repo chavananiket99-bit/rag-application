@@ -5,19 +5,27 @@ import {
   useEffect,
   useState,
   useCallback,
+  useRef,
 } from "react";
+
 import {
   getDocuments,
   getConversations,
   getConversation,
   deleteConversation,
 } from "../services/api";
+
 const UploadContext = createContext();
+
 /*
- * Convert backend documents into one standard frontend format.
+ * ============================================================
+ * DOCUMENT NORMALIZATION
+ * ============================================================
  */
+
 function normalizeDocument(doc, index = 0) {
   if (!doc) return null;
+
   // Backend document
   if (typeof doc === "object") {
     return {
@@ -27,14 +35,34 @@ function normalizeDocument(doc, index = 0) {
         doc.filename ||
         doc.name ||
         `document-${index}`,
-      filename: doc.filename || doc.name || "Unnamed document",
-      status: doc.status || "Indexed",
-      agreementType: doc.agreement_type || null,
-      expiryDate: doc.expiry_date || null,
-      uploadedAt: doc.uploaded_at || null,
-      analysis: doc.analysis || null,
+
+      filename:
+        doc.filename ||
+        doc.name ||
+        "Unnamed document",
+
+      status:
+        doc.status ||
+        "Indexed",
+
+      agreementType:
+        doc.agreement_type ||
+        null,
+
+      expiryDate:
+        doc.expiry_date ||
+        null,
+
+      uploadedAt:
+        doc.uploaded_at ||
+        null,
+
+      analysis:
+        doc.analysis ||
+        null,
     };
   }
+
   // Fallback for string filenames
   if (typeof doc === "string") {
     return {
@@ -43,194 +71,647 @@ function normalizeDocument(doc, index = 0) {
       status: "Indexed",
     };
   }
+
   return null;
 }
+
 function normalizeDocuments(documents) {
   if (!Array.isArray(documents)) {
     return [];
   }
+
   return documents
     .map((doc, index) => normalizeDocument(doc, index))
     .filter(Boolean);
 }
+
 /*
- * Cached data is stored per user so switching accounts never
- * shows another user's documents or messages.
+ * ============================================================
+ * LOCAL STORAGE HELPERS
+ * ============================================================
+ *
+ * Everything is stored per user.
+ *
+ * This prevents:
+ *
+ * User A
+ *   ↓
+ * logout
+ *   ↓
+ * User B
+ *
+ * from seeing User A's cached chat.
  */
+
 function storageKey(name, userId) {
   return `${name}:${userId || "guest"}`;
 }
+
 function readStorage(name, userId, fallback) {
   try {
-    const saved = localStorage.getItem(storageKey(name, userId));
+    const saved = localStorage.getItem(
+      storageKey(name, userId)
+    );
+
     return saved ? JSON.parse(saved) : fallback;
   } catch (error) {
-    console.error(`Failed to restore ${name}:`, error);
+    console.error(
+      `Failed to restore ${name}:`,
+      error
+    );
+
     return fallback;
   }
 }
+
+/*
+ * ============================================================
+ * CONVERSATION ID HELPER
+ * ============================================================
+ *
+ * Supports either:
+ *
+ * session.id
+ *
+ * or
+ *
+ * session.conversation_id
+ */
+
+function getConversationId(conversation) {
+  return (
+    conversation?.id ||
+    conversation?.conversation_id ||
+    null
+  );
+}
+
+/*
+ * ============================================================
+ * PROVIDER
+ * ============================================================
+ */
+
 export function UploadProvider({ children }) {
   const { isAuthenticated, user } = useAuth();
+
   const userId = user?.id || "guest";
 
+  /*
+   * ----------------------------------------------------------
+   * STATE
+   * ----------------------------------------------------------
+   */
+
   const [uploadedFiles, setUploadedFiles] = useState(() =>
-    normalizeDocuments(readStorage("uploadedFiles", userId, [])),
+    normalizeDocuments(
+      readStorage(
+        "uploadedFiles",
+        userId,
+        []
+      )
+    )
   );
+
   const [messages, setMessages] = useState(() =>
-    readStorage("messages", userId, []),
+    readStorage(
+      "messages",
+      userId,
+      []
+    )
   );
-  const [conversationId, setConversationId] = useState(() =>
-    readStorage("conversationId", userId, null),
+
+  const [conversationId, setConversationId] =
+    useState(() =>
+      readStorage(
+        "conversationId",
+        userId,
+        null
+      )
+    );
+
+  const [loading, setLoading] =
+    useState(false);
+
+  const [typing, setTyping] =
+    useState(false);
+
+  const [currentConversation, setCurrentConversation] =
+    useState(null);
+
+  const [documentsLoading, setDocumentsLoading] =
+    useState(false);
+
+  const [conversations, setConversations] =
+    useState([]);
+
+  const [conversationsLoading, setConversationsLoading] =
+    useState(false);
+
+  /*
+   * Prevent duplicate automatic restoration.
+   */
+  const restoredUserRef = useRef(null);
+
+  /*
+   * ==========================================================
+   * LOAD DOCUMENTS
+   * ==========================================================
+   */
+
+  const refreshDocuments = useCallback(
+    async () => {
+      try {
+        setDocumentsLoading(true);
+
+        const data = await getDocuments();
+
+        const backendDocuments =
+          data?.documents || [];
+
+        const normalizedDocuments =
+          normalizeDocuments(
+            backendDocuments
+          );
+
+        setUploadedFiles(
+          normalizedDocuments
+        );
+      } catch (error) {
+        console.error(
+          "Failed to load documents from backend:",
+          error
+        );
+      } finally {
+        setDocumentsLoading(false);
+      }
+    },
+    []
   );
-  const [loading, setLoading] = useState(false);
-  const [typing, setTyping] = useState(false);
-  const [currentConversation, setCurrentConversation] = useState(null);
-  const [documentsLoading, setDocumentsLoading] = useState(false);
-  const [conversations, setConversations] = useState([]);
-  const [conversationsLoading, setConversationsLoading] = useState(false);
+
   /*
-   * Load documents from backend.
+   * ==========================================================
+   * LOAD CONVERSATION LIST
+   * ==========================================================
    */
-  const refreshDocuments = useCallback(async () => {
-    try {
-      setDocumentsLoading(true);
-      const data = await getDocuments();
-      const backendDocuments = data?.documents || [];
-      const normalizedDocuments = normalizeDocuments(backendDocuments);
-      setUploadedFiles(normalizedDocuments);
-    } catch (error) {
-      console.error("Failed to load documents from backend:", error);
-    } finally {
-      setDocumentsLoading(false);
-    }
-  }, []);
+
+  const refreshConversations = useCallback(
+    async () => {
+      try {
+        setConversationsLoading(true);
+
+        const data =
+          await getConversations();
+
+        const backendConversations =
+          data?.conversations || [];
+
+        setConversations(
+          backendConversations
+        );
+      } catch (error) {
+        console.error(
+          "Failed to load conversation history:",
+          error
+        );
+      } finally {
+        setConversationsLoading(false);
+      }
+    },
+    []
+  );
+
   /*
-   * Load previous sessions for the logged-in user.
+   * ==========================================================
+   * OPEN EXISTING CONVERSATION
+   * ==========================================================
    */
-  const refreshConversations = useCallback(async () => {
-    try {
-      setConversationsLoading(true);
-      const data = await getConversations();
-      setConversations(data?.conversations || []);
-    } catch (error) {
-      console.error("Failed to load conversation history:", error);
-    } finally {
-      setConversationsLoading(false);
-    }
-  }, []);
+
+  const loadConversation = useCallback(
+    async (targetConversationId) => {
+      if (!targetConversationId) {
+        return;
+      }
+
+      try {
+        setLoading(true);
+
+        const data =
+          await getConversation(
+            targetConversationId
+          );
+
+        const loadedMessages =
+          Array.isArray(data?.messages)
+            ? data.messages
+            : [];
+
+        /*
+         * Restore messages first.
+         */
+        setMessages(
+          loadedMessages
+        );
+
+        /*
+         * Set active conversation.
+         */
+        setConversationId(
+          targetConversationId
+        );
+
+        /*
+         * Store the complete conversation
+         * when the backend returns it.
+         */
+        setCurrentConversation(
+          data?.conversation ||
+            data ||
+            null
+        );
+      } catch (error) {
+        console.error(
+          "Failed to open conversation:",
+          error
+        );
+
+        /*
+         * IMPORTANT:
+         *
+         * Do not clear the existing chat if
+         * loading another conversation fails.
+         *
+         * This prevents accidental data loss
+         * in the UI.
+         */
+      } finally {
+        setLoading(false);
+      }
+    },
+    []
+  );
+
   /*
-   * Open a previous session in the chat window.
+   * ==========================================================
+   * DELETE CONVERSATION
+   * ==========================================================
    */
-  const loadConversation = useCallback(async (targetConversationId) => {
-    if (!targetConversationId) return;
-    try {
-      setLoading(true);
-      const data = await getConversation(targetConversationId);
-      setMessages(data?.messages || []);
-      setConversationId(targetConversationId);
-    } catch (error) {
-      console.error("Failed to open conversation:", error);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+
+  const removeConversation = useCallback(
+    async (targetConversationId) => {
+      if (!targetConversationId) {
+        return;
+      }
+
+      try {
+        await deleteConversation(
+          targetConversationId
+        );
+
+        /*
+         * Remove it from history immediately.
+         */
+        setConversations((prev) =>
+          prev.filter(
+            (item) =>
+              String(
+                getConversationId(item)
+              ) !==
+              String(
+                targetConversationId
+              )
+          )
+        );
+
+        /*
+         * If the deleted conversation is
+         * currently open, reset the chat.
+         */
+        setConversationId((prev) => {
+          if (
+            String(prev) ===
+            String(targetConversationId)
+          ) {
+            setMessages([]);
+            setCurrentConversation(null);
+
+            return null;
+          }
+
+          return prev;
+        });
+      } catch (error) {
+        console.error(
+          "Failed to delete conversation:",
+          error
+        );
+
+        /*
+         * Re-sync with backend in case
+         * the delete partially succeeded.
+         */
+        await refreshConversations();
+      }
+    },
+    [refreshConversations]
+  );
+
   /*
-   * Remove a previous session.
+   * ==========================================================
+   * START NEW CONVERSATION
+   * ==========================================================
    */
-  const removeConversation = useCallback(async (targetConversationId) => {
-    if (!targetConversationId) return;
-    try {
-      await deleteConversation(targetConversationId);
-      setConversations((prev) =>
-        prev.filter((item) => item.id !== targetConversationId),
-      );
-      setConversationId((prev) => {
-        if (prev === targetConversationId) {
-          setMessages([]);
-          return null;
-        }
-        return prev;
-      });
-    } catch (error) {
-      console.error("Failed to delete conversation:", error);
-    }
-  }, []);
+
   const startNewConversation = useCallback(() => {
+    /*
+     * Clear current messages.
+     */
     setMessages([]);
+
+    /*
+     * Remove active conversation.
+     *
+     * The next message sent by the user can
+     * create/use a new conversation according
+     * to the existing chat/API logic.
+     */
     setConversationId(null);
+
+    /*
+     * Clear the complete conversation object.
+     */
+    setCurrentConversation(null);
+
+    /*
+     * Reset UI loading states.
+     */
+    setLoading(false);
+    setTyping(false);
   }, []);
+
   /*
-   * Reload cached state whenever the signed-in user changes.
+   * ==========================================================
+   * RESTORE STATE WHEN USER CHANGES
+   * ==========================================================
+   *
+   * The previous implementation performed these
+   * state changes directly during render.
+   *
+   * We now do it in an effect.
    */
-  const [lastUserId, setLastUserId] = useState(userId);
-  if (lastUserId !== userId) {
-    setLastUserId(userId);
+
+  useEffect(() => {
+    if (restoredUserRef.current === userId) {
+      return;
+    }
+
+    restoredUserRef.current = userId;
+
+    const cachedDocuments =
+      normalizeDocuments(
+        readStorage(
+          "uploadedFiles",
+          userId,
+          []
+        )
+      );
+
+    const cachedMessages =
+      readStorage(
+        "messages",
+        userId,
+        []
+      );
+
+    const cachedConversationId =
+      readStorage(
+        "conversationId",
+        userId,
+        null
+      );
+
     setUploadedFiles(
-      normalizeDocuments(readStorage("uploadedFiles", userId, [])),
+      cachedDocuments
     );
-    setMessages(readStorage("messages", userId, []));
-    setConversationId(readStorage("conversationId", userId, null));
+
+    setMessages(
+      cachedMessages
+    );
+
+    setConversationId(
+      cachedConversationId
+    );
+
+    setCurrentConversation(null);
+
     setConversations([]);
-  }
+  }, [userId]);
+
   /*
-   * Persist uploaded documents.
+   * ==========================================================
+   * PERSIST DOCUMENTS
+   * ==========================================================
    */
+
   useEffect(() => {
-    localStorage.setItem(
-      storageKey("uploadedFiles", userId),
-      JSON.stringify(uploadedFiles),
-    );
-  }, [uploadedFiles, userId]);
+    try {
+      localStorage.setItem(
+        storageKey(
+          "uploadedFiles",
+          userId
+        ),
+        JSON.stringify(
+          uploadedFiles
+        )
+      );
+    } catch (error) {
+      console.error(
+        "Failed to persist documents:",
+        error
+      );
+    }
+  }, [
+    uploadedFiles,
+    userId,
+  ]);
+
   /*
-   * Persist chat messages.
+   * ==========================================================
+   * PERSIST CHAT MESSAGES
+   * ==========================================================
    */
+
   useEffect(() => {
-    localStorage.setItem(
-      storageKey("messages", userId),
-      JSON.stringify(messages),
-    );
-  }, [messages, userId]);
+    try {
+      localStorage.setItem(
+        storageKey(
+          "messages",
+          userId
+        ),
+        JSON.stringify(messages)
+      );
+    } catch (error) {
+      console.error(
+        "Failed to persist messages:",
+        error
+      );
+    }
+  }, [
+    messages,
+    userId,
+  ]);
+
   /*
-   * Persist the active session id.
+   * ==========================================================
+   * PERSIST ACTIVE CONVERSATION
+   * ==========================================================
    */
+
   useEffect(() => {
-    localStorage.setItem(
-      storageKey("conversationId", userId),
-      JSON.stringify(conversationId),
-    );
-  }, [conversationId, userId]);
+    try {
+      localStorage.setItem(
+        storageKey(
+          "conversationId",
+          userId
+        ),
+        JSON.stringify(
+          conversationId
+        )
+      );
+    } catch (error) {
+      console.error(
+        "Failed to persist conversation ID:",
+        error
+      );
+    }
+  }, [
+    conversationId,
+    userId,
+  ]);
+
   /*
-   * Load backend documents and history when the user signs in.
+   * ==========================================================
+   * LOAD BACKEND DATA AFTER LOGIN
+   * ==========================================================
    */
+
   useEffect(() => {
     if (!isAuthenticated) {
       setUploadedFiles([]);
+      setMessages([]);
+      setConversationId(null);
+      setCurrentConversation(null);
       setConversations([]);
+
       return;
     }
+
     refreshDocuments();
     refreshConversations();
-  }, [isAuthenticated, userId, refreshDocuments, refreshConversations]);
+  }, [
+    isAuthenticated,
+    userId,
+    refreshDocuments,
+    refreshConversations,
+  ]);
+
+  /*
+   * ==========================================================
+   * RESTORE ACTIVE BACKEND CONVERSATION
+   * ==========================================================
+   *
+   * This is the main Step 5 improvement.
+   *
+   * Example:
+   *
+   * User opens Chat #15
+   *       ↓
+   * conversationId = 15
+   *       ↓
+   * browser refresh
+   *       ↓
+   * localStorage restores 15
+   *       ↓
+   * getConversation(15)
+   *       ↓
+   * messages restored
+   */
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+
+    if (!conversationId) {
+      return;
+    }
+
+    /*
+     * If messages are already present for this
+     * conversation, don't make another request.
+     *
+     * This avoids an unnecessary API call during
+     * normal navigation.
+     */
+    if (messages.length > 0) {
+      return;
+    }
+
+    loadConversation(
+      conversationId
+    );
+  }, [
+    isAuthenticated,
+    conversationId,
+    loadConversation,
+    messages.length,
+  ]);
+
+  /*
+   * ==========================================================
+   * CONTEXT VALUE
+   * ==========================================================
+   */
+
   return (
     <UploadContext.Provider
       value={{
+        /*
+         * Documents
+         */
         uploadedFiles,
         setUploadedFiles,
+        documentsLoading,
+        refreshDocuments,
+
+        /*
+         * Chat
+         */
         messages,
         setMessages,
         loading,
         setLoading,
         typing,
         setTyping,
-        currentConversation,
-        setCurrentConversation,
-        documentsLoading,
-        refreshDocuments,
+
+        /*
+         * Current conversation
+         */
         conversationId,
         setConversationId,
+        currentConversation,
+        setCurrentConversation,
+
+        /*
+         * Conversation history
+         */
         conversations,
         conversationsLoading,
         refreshConversations,
+
+        /*
+         * Conversation actions
+         */
         loadConversation,
         removeConversation,
         startNewConversation,
@@ -240,6 +721,15 @@ export function UploadProvider({ children }) {
     </UploadContext.Provider>
   );
 }
+
+/*
+ * ============================================================
+ * HOOK
+ * ============================================================
+ */
+
 export function useUpload() {
-  return useContext(UploadContext);
+  return useContext(
+    UploadContext
+  );
 }
