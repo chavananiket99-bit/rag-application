@@ -1,132 +1,108 @@
 import { useEffect, useRef } from "react";
-import {
-  Bot,
-  FileSearch,
-  Sparkles,
-  ShieldCheck,
-  MessageSquare,
-  Trash2,
-} from "lucide-react";
 import MessageBubble from "./MessageBubble";
-export default function ChatWindow({ messages, typing, onClearChat }) {
-  const bottomRef = useRef(null);
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({
-      behavior: "smooth",
-    });
-  }, [messages, typing]);
-  const hasMessages = messages && messages.length > 0;
-  return (
-    <div className="min-h-0 flex-1 overflow-y-auto bg-slate-50 pb-32">
-      {!hasMessages ? (
-        <div className="flex min-h-full items-center justify-center px-4 py-5 sm:px-6">
-          <div className="w-full max-w-3xl">
-            {/* Hero */}
-            <div className="text-center">
-              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-red-50 shadow-sm">
-                <Bot size={25} className="text-red-700" />
-              </div>
-              <h1 className="mt-3 text-xl font-semibold tracking-tight text-slate-800 sm:text-2xl">
-                Enterprise AI Assistant
-              </h1>
-              <p className="mx-auto mt-3 max-w-xl text-sm leading-6 text-slate-500">
-                Ask questions about your uploaded documents and get answers
-                grounded in your enterprise knowledge base.
-              </p>
-            </div>
-            {/* Capability cards */}
-            <div className="mt-5 grid gap-3 sm:grid-cols-3">
-              <CapabilityCard
-                icon={<FileSearch size={19} />}
-                title="Document Search"
-                description="Find relevant information across your uploaded documents."
-              />
-              <CapabilityCard
-                icon={<MessageSquare size={19} />}
-                title="Natural Questions"
-                description="Ask questions using normal business language."
-              />
-              <CapabilityCard
-                icon={<ShieldCheck size={19} />}
-                title="Knowledge Grounded"
-                description="Answers are generated using your document knowledge."
-              />
-            </div>
-            {/* Prompt hint */}
-            <div className="mt-5 flex items-center justify-center gap-2 text-xs text-slate-400">
-              <Sparkles size={14} className="text-red-500" />
-              <span>
-                Start by asking a question about your uploaded documents.
-              </span>
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div className="mx-auto w-full max-w-4xl px-4 py-6 sm:px-6 sm:py-8">
-          <div className="mb-5 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <MessageSquare size={17} className="text-slate-400" />
-              <span className="text-xs font-medium text-slate-500">
-                Conversation
-              </span>
-            </div>
-            {messages.length > 0 && (
-              <button
-                type="button"
-                onClick={onClearChat}
-                disabled={typing}
-                className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-500 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50"
-                title="Clear Conversation"
-              >
-                <Trash2 size={14} />
-                <span>Clear Chat</span>
-              </button>
-            )}
-          </div>
-          <div className="space-y-6">
-            {messages.map((message, index) => (
-              <MessageBubble
-                key={`${message.role}-${index}`}
-                sender={message.role}
-                text={message.content}
-                sources={message.sources || []}
-              />
-            ))}
-            {typing && (
-              <div className="flex items-start gap-3">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-red-50">
-                  <Bot size={18} className="text-red-700" />
-                </div>
-                <div className="rounded-2xl rounded-tl-md border border-slate-200 bg-white px-4 py-3 shadow-sm">
-                  <div className="flex items-center gap-1.5">
-                    <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400" />
-                    <span
-                      className="h-2 w-2 animate-bounce rounded-full bg-slate-400"
-                      style={{ animationDelay: "150ms" }}
-                    />
-                    <span
-                      className="h-2 w-2 animate-bounce rounded-full bg-slate-400"
-                      style={{ animationDelay: "300ms" }}
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-            <div ref={bottomRef} />
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-function CapabilityCard({ icon, title, description }) {
-  return (
-    <div className="rounded-xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
-      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-red-50 text-red-700">
-        {icon}
-      </div>
-      <p className="mt-3 text-sm font-semibold text-slate-700">{title}</p>
-      <p className="mt-1 text-xs leading-5 text-slate-500">{description}</p>
-    </div>
-  );
+import { Loader2, MessageSquare } from "lucide-react";
+export default function ChatWindow({
+ messages = [],
+ isLoading = false,
+ error = "",
+ onRetry,
+}) {
+ const scrollRef = useRef(null);
+ /*
+  * Automatically scroll when:
+  * - a new message arrives
+  * - assistant starts/stops responding
+  */
+ useEffect(() => {
+   const container = scrollRef.current;
+   if (!container) return;
+   container.scrollTo({
+     top: container.scrollHeight,
+     behavior: "smooth",
+   });
+ }, [messages, isLoading]);
+ return (
+<div
+     ref={scrollRef}
+     className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-6 sm:px-6"
+>
+     {/* =====================================================
+         EMPTY CHAT
+     ====================================================== */}
+     {messages.length === 0 && !isLoading && (
+<div className="flex flex-1 items-center justify-center">
+<div className="max-w-md text-center">
+<div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-red-950/40">
+<MessageSquare
+               size={25}
+               className="text-red-500"
+             />
+</div>
+<h2 className="text-lg font-semibold text-slate-200">
+             How can I help you?
+</h2>
+<p className="mt-2 text-sm leading-6 text-slate-500">
+             Ask a question about your uploaded documents and
+             the knowledge assistant will search the available
+             information.
+</p>
+</div>
+</div>
+     )}
+     {/* =====================================================
+         MESSAGES
+     ====================================================== */}
+     {messages.length > 0 && (
+<div className="mx-auto w-full max-w-4xl space-y-5">
+         {messages.map((message, index) => (
+<MessageBubble
+             key={message.id || `${message.role}-${index}`}
+             sender={message.role}
+             text={message.content}
+             sources={message.sources || []}
+             isError={message.isError}
+             onRetry={
+               message.isError && onRetry
+                 ? () => onRetry(message)
+                 : undefined
+             }
+           />
+         ))}
+         {/* =================================================
+             ASSISTANT LOADING
+         ================================================== */}
+         {isLoading && (
+<div className="flex items-start gap-3">
+<div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-red-950/40">
+<Loader2
+                 size={15}
+                 className="animate-spin text-red-500"
+               />
+</div>
+<div className="rounded-2xl rounded-tl-md border border-slate-800 bg-slate-900/70 px-4 py-3">
+<div className="flex items-center gap-1.5">
+<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-slate-500" />
+<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-slate-500 [animation-delay:150ms]" />
+<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-slate-500 [animation-delay:300ms]" />
+</div>
+</div>
+</div>
+         )}
+         {/* =================================================
+             GLOBAL ERROR
+         ================================================== */}
+         {error && !isLoading && (
+<div className="rounded-xl border border-red-900/50 bg-red-950/20 px-4 py-3">
+<p className="text-xs font-medium text-red-400">
+               Something went wrong
+</p>
+<p className="mt-1 text-xs leading-5 text-slate-500">
+               {error}
+</p>
+</div>
+         )}
+</div>
+     )}
+</div>
+ );
 }
