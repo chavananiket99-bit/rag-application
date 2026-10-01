@@ -765,14 +765,13 @@ def home():
 # UPLOAD
 # ============================================================
 
-
 # ============================================================
 # UPLOAD PERFORMANCE / BACKGROUND JOBS
 # ============================================================
 
 # OCR/PDF extraction is blocking CPU-heavy work. Keep the number of
-# simultaneous document workers bounded so a 10-file upload does not
-# overwhelm the user's machine.
+# simultaneous document workers bounded so a large multi-file upload does
+# not overwhelm the user's machine.
 MAX_PARALLEL_DOCUMENT_PROCESSING = max(
     1,
     min(
@@ -781,9 +780,9 @@ MAX_PARALLEL_DOCUMENT_PROCESSING = max(
     ),
 )
 
-# The HTTP upload request should only save the physical files and enqueue
-# the processing job. The actual OCR/analysis/indexing happens after the
-# response has been returned.
+# The HTTP upload request only saves the physical files and queues one
+# background job. The expensive processing continues after the HTTP
+# response has returned.
 UPLOAD_JOB_EXECUTOR = ThreadPoolExecutor(
     max_workers=1,
     thread_name_prefix="upload-job",
@@ -836,7 +835,6 @@ def _update_upload_job(job_id, **updates):
         job = UPLOAD_JOBS.get(job_id)
         if not job:
             return
-
         job.update(updates)
 
 
@@ -859,7 +857,7 @@ def _update_upload_file(
         target = None
         for item in job["files"]:
             if item["filename"] == filename:
-                # If duplicate filenames were uploaded, use the first
+                # If duplicate filenames were uploaded, prefer the first
                 # non-terminal matching entry.
                 if item["status"] not in {"completed", "failed"}:
                     target = item
@@ -883,7 +881,6 @@ def _update_upload_file(
         if error is not None:
             target["error"] = str(error)
 
-        # Overall progress is the average of per-file progress.
         progress_values = [
             item["progress"]
             for item in job["files"]
@@ -899,9 +896,9 @@ def _prepare_uploaded_document(job):
     """
     Prepare one uploaded document without touching shared metadata/FAISS.
 
-    Expensive work is allowed to overlap between a small number of
-    document workers. Shared persistence is handled later by the single
-    background upload worker.
+    Expensive PDF/OCR/chunk/agreement-analysis work can overlap between a
+    small number of document workers. Shared persistence is handled later
+    by the single background upload worker.
     """
     filename = job["filename"]
     file_path = job["file_path"]
@@ -923,7 +920,10 @@ def _prepare_uploaded_document(job):
             job_id,
             filename,
             status="processing",
-            stage=f"Processing page {completed_pages}/{total_pages}",
+            stage=(
+                f"Processing page "
+                f"{completed_pages}/{total_pages}"
+            ),
             progress=progress,
             pages=total_pages,
             completed_pages=completed_pages,
@@ -955,11 +955,15 @@ def _prepare_uploaded_document(job):
         chunks = result.get("chunks", [])
         ocr_used = result.get("ocr_used", False)
 
-        extraction_seconds = time.perf_counter() - extraction_started
+        extraction_seconds = (
+            time.perf_counter()
+            - extraction_started
+        )
 
         logger.info(
             "[UPLOAD-PREP] Extraction completed | file=%s | "
-            "seconds=%.2f | characters=%s | pages=%s | chunks=%s | OCR=%s",
+            "seconds=%.2f | characters=%s | pages=%s | "
+            "chunks=%s | OCR=%s",
             filename,
             extraction_seconds,
             len(text),
@@ -996,10 +1000,19 @@ def _prepare_uploaded_document(job):
 
         if agreement_analysis.get("expiry_date"):
             expiry_date = agreement_analysis["expiry_date"]
-            agreement_type = agreement_type or "Agreement"
+            agreement_type = (
+                agreement_type
+                or "Agreement"
+            )
 
-        analysis_seconds = time.perf_counter() - analysis_started
-        total_seconds = time.perf_counter() - started_at
+        analysis_seconds = (
+            time.perf_counter()
+            - analysis_started
+        )
+        total_seconds = (
+            time.perf_counter()
+            - started_at
+        )
 
         logger.info(
             "[UPLOAD-PREP] Ready for indexing | file=%s | "
@@ -1023,7 +1036,10 @@ def _prepare_uploaded_document(job):
         }
 
     except Exception as exc:
-        total_seconds = time.perf_counter() - started_at
+        total_seconds = (
+            time.perf_counter()
+            - started_at
+        )
 
         logger.exception(
             "[UPLOAD-PREP] Failed | file=%s",
@@ -1046,8 +1062,9 @@ def _run_upload_job(
     Background upload pipeline.
 
     1. Prepare PDFs/OCR/agreement analysis with bounded concurrency.
-    2. Persist document metadata and FAISS in one controlled worker.
-    3. Save FAISS once after all successful documents are added.
+    2. Persist document metadata in a controlled phase.
+    3. Generate embeddings and update FAISS as one batch.
+    4. Save FAISS once after all successful documents are added.
     """
     request_started = time.perf_counter()
 
@@ -1088,7 +1105,9 @@ def _run_upload_job(
             ]
 
             for future in futures:
-                prepared_results.append(future.result())
+                prepared_results.append(
+                    future.result()
+                )
 
         logger.info(
             "[UPLOAD-PREP] All parallel preparation completed | "
@@ -1100,40 +1119,44 @@ def _run_upload_job(
         uploaded_documents = []
         failed_documents = []
 
-        # ------------------------------------------------------------
-        # ------------------------------------------------------------
-        # CONTROLLED METADATA + BATCH FAISS INDEXING
-        # ------------------------------------------------------------
         _update_upload_job(
             job_id,
             stage="Preparing index batch",
             progress=80,
         )
 
-        uploaded_documents = []
-        failed_documents = []
         with UPLOAD_JOBS_LOCK:
-            existing_job = UPLOAD_JOBS.get(job_id, {})
-            failed_documents.extend(existing_job.get("failures", []))
+            existing_job = UPLOAD_JOBS.get(
+                job_id,
+                {}
+            )
+            failed_documents.extend(
+                existing_job.get(
+                    "failures",
+                    []
+                )
+            )
+
         index_items = []
         document_records = []
 
         for result in prepared_results:
             job = result["job"]
             original_filename = job["filename"]
-            file_path = job["file_path"]
 
             if not result.get("success"):
                 error = result.get(
                     "error",
                     "Document preparation failed.",
                 )
+
                 failed_documents.append(
                     {
                         "filename": original_filename,
                         "error": error,
                     }
                 )
+
                 _update_upload_file(
                     job_id,
                     original_filename,
@@ -1151,7 +1174,9 @@ def _run_upload_job(
                 ocr_used = result["ocr_used"]
                 expiry_date = result["expiry_date"]
                 agreement_type = result["agreement_type"]
-                agreement_analysis = result["agreement_analysis"]
+                agreement_analysis = result[
+                    "agreement_analysis"
+                ]
 
                 _update_upload_file(
                     job_id,
@@ -1194,15 +1219,18 @@ def _run_upload_job(
 
             except Exception as exc:
                 logger.exception(
-                    "[UPLOAD-INDEX] Metadata preparation failed | file=%s",
+                    "[UPLOAD-INDEX] Metadata preparation failed | "
+                    "file=%s",
                     original_filename,
                 )
+
                 failed_documents.append(
                     {
                         "filename": original_filename,
                         "error": str(exc),
                     }
                 )
+
                 _update_upload_file(
                     job_id,
                     original_filename,
@@ -1212,23 +1240,48 @@ def _run_upload_job(
                     error=str(exc),
                 )
 
-        # ------------------------------------------------------------
+        # --------------------------------------------------------
         # ONE BATCH EMBEDDING + ONE FAISS MUTATION + ONE SAVE
-        # ------------------------------------------------------------
+        # --------------------------------------------------------
         if index_items:
             try:
                 _update_upload_job(
                     job_id,
-                    stage="Generating embeddings and indexing",
+                    stage=(
+                        "Generating embeddings and indexing"
+                    ),
                     progress=88,
                 )
 
                 faiss_started = time.perf_counter()
-                batch_added = vector_store.add_documents_batch(
-                    index_items,
-                    persist=True,
+
+                # Use the optimized batch API when the installed
+                # vector_store provides it. Otherwise fall back to the
+                # existing add_document API so this app.py remains
+                # compatible with the current vector_store.py.
+                if hasattr(vector_store, "add_documents_batch"):
+                    batch_added = vector_store.add_documents_batch(
+                        index_items,
+                        persist=True,
+                    )
+                else:
+                    batch_added = []
+                    for item in index_items:
+                        chunks_added = vector_store.add_document(
+                            document_id=item["document_id"],
+                            filename=item["filename"],
+                            chunks=item["chunks"],
+                            user_id=item.get("user_id"),
+                        )
+                        batch_added.append({
+                            "document_id": item["document_id"],
+                            "chunks_added": chunks_added,
+                        })
+
+                faiss_seconds = (
+                    time.perf_counter()
+                    - faiss_started
                 )
-                faiss_seconds = time.perf_counter() - faiss_started
 
                 added_by_id = {
                     item["document_id"]: item
@@ -1239,30 +1292,54 @@ def _run_upload_job(
                     document = record["document"]
                     job = record["job"]
                     filename = job["filename"]
-                    added = added_by_id.get(document["id"])
+                    added = added_by_id.get(
+                        document["id"]
+                    )
 
                     if not added:
                         raise RuntimeError(
-                            f"FAISS batch did not return document: {filename}"
+                            "FAISS batch did not return "
+                            f"document: {filename}"
                         )
 
-                    chunks_added = added["chunks_added"]
-                    if chunks_added != len(record["chunks"]):
+                    chunks_added = added[
+                        "chunks_added"
+                    ]
+
+                    if chunks_added != len(
+                        record["chunks"]
+                    ):
                         raise RuntimeError(
-                            f"FAISS indexing count mismatch for {filename}."
+                            "FAISS indexing count mismatch "
+                            f"for {filename}."
                         )
 
                     uploaded_documents.append(
                         {
                             "document": document,
-                            "characters": len(record["text"]),
-                            "pages": len(record["pages"]),
-                            "chunks": len(record["chunks"]),
-                            "faiss_chunks_added": chunks_added,
-                            "ocr_used": record["ocr_used"],
-                            "preview": record["text"][:500],
+                            "characters": len(
+                                record["text"]
+                            ),
+                            "pages": len(
+                                record["pages"]
+                            ),
+                            "chunks": len(
+                                record["chunks"]
+                            ),
+                            "faiss_chunks_added": (
+                                chunks_added
+                            ),
+                            "ocr_used": record[
+                                "ocr_used"
+                            ],
+                            "preview": record[
+                                "text"
+                            ][:500],
                             "processing_seconds": round(
-                                record["result"].get("prep_seconds", 0.0)
+                                record["result"].get(
+                                    "prep_seconds",
+                                    0.0,
+                                )
                                 + faiss_seconds,
                                 2,
                             ),
@@ -1276,25 +1353,25 @@ def _run_upload_job(
                         stage="Completed",
                         progress=100,
                         pages=len(record["pages"]),
-                        completed_pages=len(record["pages"]),
+                        completed_pages=len(
+                            record["pages"]
+                        ),
                     )
 
                 logger.info(
-                    "[UPLOAD-INDEX] Batch completed | job=%s | documents=%s | seconds=%.2f",
+                    "[UPLOAD-INDEX] Batch completed | job=%s | "
+                    "documents=%s | seconds=%.2f",
                     job_id,
                     len(uploaded_documents),
                     faiss_seconds,
                 )
 
-            except Exception as exc:
+            except Exception as exc:    
                 logger.exception(
                     "[UPLOAD-INDEX] Batch indexing failed | job=%s",
                     job_id,
                 )
 
-                # The vector-store batch operation is atomic and rolls back
-                # its FAISS mutation on failure. Remove the corresponding
-                # document-manager records as well.
                 for record in document_records:
                     document = record["document"]
                     job = record["job"]
@@ -1328,12 +1405,13 @@ def _run_upload_job(
 
                 uploaded_documents = []
 
-        # Failed prepared files can be removed; successful PDFs remain stored
-        # because the application already relies on stored_filename.
+        # Remove failed physical files. Successful PDFs remain stored.
         for result in prepared_results:
             if result.get("success"):
                 continue
+
             file_path = result["job"]["file_path"]
+
             try:
                 if file_path.exists():
                     file_path.unlink()
@@ -1343,9 +1421,17 @@ def _run_upload_job(
                     result["job"]["filename"],
                 )
 
-        total_seconds = time.perf_counter() - request_started
-        successful_files = len(uploaded_documents)
-        failed_files = len(failed_documents)
+        total_seconds = (
+            time.perf_counter()
+            - request_started
+        )
+
+        successful_files = len(
+            uploaded_documents
+        )
+        failed_files = len(
+            failed_documents
+        )
 
         _update_upload_job(
             job_id,
@@ -1356,7 +1442,10 @@ def _run_upload_job(
             failed_files=failed_files,
             documents=uploaded_documents,
             failures=failed_documents,
-            total_seconds=round(total_seconds, 2),
+            total_seconds=round(
+                total_seconds,
+                2,
+            ),
         )
 
         logger.info(
@@ -1435,7 +1524,10 @@ async def upload_files(
             detail="Agreement metadata must be valid JSON.",
         ) from exc
 
-    if not isinstance(parsed_agreement_metadata, list):
+    if not isinstance(
+        parsed_agreement_metadata,
+        list,
+    ):
         raise HTTPException(
             status_code=400,
             detail="Agreement metadata must be a list.",
@@ -1450,18 +1542,37 @@ async def upload_files(
     for file_index, file in enumerate(files):
         metadata = (
             parsed_agreement_metadata[file_index]
-            if file_index < len(parsed_agreement_metadata)
-            and isinstance(parsed_agreement_metadata[file_index], dict)
+            if (
+                file_index
+                < len(parsed_agreement_metadata)
+                and isinstance(
+                    parsed_agreement_metadata[
+                        file_index
+                    ],
+                    dict,
+                )
+            )
             else {}
         )
 
-        expiry_date = metadata.get("expiry_date") or None
-        agreement_type = metadata.get("agreement_type") or None
+        expiry_date = (
+            metadata.get("expiry_date")
+            or None
+        )
+        agreement_type = (
+            metadata.get("agreement_type")
+            or None
+        )
 
         if expiry_date:
             try:
-                date.fromisoformat(expiry_date)
-            except (TypeError, ValueError) as exc:
+                date.fromisoformat(
+                    expiry_date
+                )
+            except (
+                TypeError,
+                ValueError,
+            ) as exc:
                 raise HTTPException(
                     status_code=400,
                     detail=(
@@ -1471,26 +1582,41 @@ async def upload_files(
                 ) from exc
 
         original_filename = Path(
-            file.filename or "uploaded_file.pdf"
+            file.filename
+            or "uploaded_file.pdf"
         ).name
 
         unique_id = uuid.uuid4().hex
-        stored_filename = f"{unique_id}_{original_filename}"
-        file_path = UPLOAD_FOLDER / stored_filename
+        stored_filename = (
+            f"{unique_id}_{original_filename}"
+        )
+        file_path = (
+            UPLOAD_FOLDER
+            / stored_filename
+        )
 
         try:
             save_started = time.perf_counter()
 
-            with open(file_path, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
+            with open(
+                file_path,
+                "wb"
+            ) as buffer:
+                shutil.copyfileobj(
+                    file.file,
+                    buffer,
+                )
 
-            file_size = os.path.getsize(file_path)
+            file_size = os.path.getsize(
+                file_path
+            )
 
             logger.info(
                 "[UPLOAD-SAVE] Saved | file=%s | bytes=%s | seconds=%.2f",
                 original_filename,
                 file_size,
-                time.perf_counter() - save_started,
+                time.perf_counter()
+                - save_started,
             )
 
             prepared_jobs.append(
@@ -1530,11 +1656,15 @@ async def upload_files(
 
     if not prepared_jobs:
         return {
-            "message": "No files could be queued for processing.",
+            "message": (
+                "No files could be queued for processing."
+            ),
             "job_id": None,
             "total_files": len(files),
             "successful_files": 0,
-            "failed_files": len(immediate_failures),
+            "failed_files": len(
+                immediate_failures
+            ),
             "documents": [],
             "failures": immediate_failures,
         }
@@ -1544,20 +1674,19 @@ async def upload_files(
         prepared_jobs,
     )
 
-    # Attach the job ID to every processing task.
     for job in prepared_jobs:
         job["job_id"] = job_id
 
     if immediate_failures:
         with UPLOAD_JOBS_LOCK:
-            job_state = UPLOAD_JOBS.get(job_id)
+            job_state = UPLOAD_JOBS.get(
+                job_id
+            )
             if job_state:
                 job_state["failures"].extend(
                     immediate_failures
                 )
 
-    # Submit exactly one batch job. Inside it, document preparation uses
-    # bounded parallelism and FAISS persistence is controlled centrally.
     UPLOAD_JOB_EXECUTOR.submit(
         _run_upload_job,
         job_id,
@@ -1565,11 +1694,15 @@ async def upload_files(
     )
 
     return {
-        "message": "Upload received. Document processing started.",
+        "message": (
+            "Upload received. Document processing started."
+        ),
         "job_id": job_id,
         "total_files": len(files),
         "successful_files": 0,
-        "failed_files": len(immediate_failures),
+        "failed_files": len(
+            immediate_failures
+        ),
         "documents": [],
         "failures": immediate_failures,
         "status": "processing",
@@ -1584,25 +1717,223 @@ async def get_upload_status(
     ),
 ):
     with UPLOAD_JOBS_LOCK:
-        job = UPLOAD_JOBS.get(job_id)
+        job = UPLOAD_JOBS.get(
+            job_id
+        )
 
         if not job:
             raise HTTPException(
                 status_code=404,
-                detail="Upload job was not found. It may have expired after a backend restart.",
+                detail=(
+                    "Upload job was not found. "
+                    "It may have expired after a backend restart."
+                ),
             )
 
         if job["user_id"] != current_user["id"]:
             raise HTTPException(
                 status_code=403,
-                detail="You are not allowed to view this upload job.",
+                detail=(
+                    "You are not allowed to view "
+                    "this upload job."
+                ),
             )
 
-        # Return a detached copy so callers cannot mutate shared state.
         return json.loads(
             json.dumps(job)
         )
 
+
+# ============================================================
+# QUESTION INTENT
+# ============================================================
+
+def _detect_question_intent(question):
+    if not question:
+        return "general"
+    normalized = re.sub(r"\s+", " ", question.lower()).strip()
+
+    signature_terms = [
+        "signatory", "signatories", "signature", "signatures", "signed",
+        "signed by", "who signed", "who has signed", "who executed",
+        "execution", "authorized signatory", "authorised signatory",
+        "authorized representative", "authorised representative", "representative",
+        "esign", "e sign", "e-sign", "electronic signature",
+        "electronically signed", "digital signed", "digital signature",
+        "signed electronically", "sign desk", "signdesk",
+    ]
+    lifecycle_terms = [
+        "effective date", "start date", "commencement date", "expiry",
+        "expiry date", "end date", "termination date", "tenure", "term",
+        "duration", "validity", "valid until", "active", "expired",
+        "renewal", "renew", "agreement period",
+    ]
+    commercial_terms = [
+        "price", "pricing", "rate", "rent", "rental", "cost", "amount",
+        "charge", "payment", "payment terms", "commercial", "markup",
+        "mark-up", "margin", "fee", "consideration",
+    ]
+    purpose_terms = [
+        "purpose", "business purpose", "business rationale", "business need",
+        "objective", "strategic objective", "why was", "why did", "reason for",
+        "commercial intent", "business justification",
+    ]
+    summary_terms = [
+        "summary", "summarize", "summarise", "summarized", "summarised",
+        "overview", "executive summary", "key points", "main points", "highlights",
+        "give me a summary", "provide a summary", "brief summary", "brief overview",
+    ]
+    transaction_terms = [
+        "transaction", "nature of transaction", "nature of activity", "activity",
+        "activities", "sale", "purchase", "service", "services", "design service",
+        "manufacturing", "contract manufacturing", "royalty", "procurement",
+    ]
+    actualization_terms = [
+        "actualization", "actualisation", "actualize", "actualise", "actualized", "actualised",
+    ]
+
+    if any(term in normalized for term in signature_terms): return "signature"
+    if any(term in normalized for term in lifecycle_terms): return "lifecycle"
+    if any(term in normalized for term in actualization_terms): return "actualization"
+    if any(term in normalized for term in commercial_terms): return "commercial"
+    if any(term in normalized for term in purpose_terms): return "purpose"
+    if any(term in normalized for term in summary_terms): return "summary"
+    if any(term in normalized for term in transaction_terms): return "transaction"
+    return "general"
+
+
+def _is_comparison_question(question):
+    normalized = (question or "").lower()
+    comparison_terms = [
+        "compare", "comparison", "comparative", "versus", " vs ",
+        "difference between", "differences between", "both agreements",
+        "all agreements", "same clause", "which agreement",
+    ]
+    return any(term in normalized for term in comparison_terms)
+
+
+def _answer_agreement_portfolio_question(question, documents):
+    normalized = re.sub(r"\s+", " ", (question or "").lower()).strip()
+    if "agreement" not in normalized:
+        return None
+
+    today = date.today()
+    agreements = [
+        document for document in documents
+        if document.get("expiry_date")
+    ]
+    selected = None
+    heading = None
+
+    days_match = re.search(
+        r"(?:expir\w*|due)\s+(?:in|within)\s+(?:the\s+)?next\s+(\d+)\s+days",
+        normalized,
+    )
+    if days_match:
+        days = int(days_match.group(1))
+        deadline = today + timedelta(days=days)
+        selected = [
+            document for document in agreements
+            if today <= date.fromisoformat(document["expiry_date"]) <= deadline
+        ]
+        heading = f"Agreements expiring in the next {days} days"
+    elif re.search(r"\bexpired\s+agreements?\b", normalized):
+        selected = [
+            document for document in agreements
+            if date.fromisoformat(document["expiry_date"]) < today
+        ]
+        heading = "Expired agreements"
+    elif re.search(r"\bactive\s+agreements?\b", normalized):
+        selected = [
+            document for document in agreements
+            if date.fromisoformat(document["expiry_date"]) >= today
+        ]
+        heading = "Active agreements"
+
+    if selected is None:
+        return None
+
+    selected.sort(key=lambda document: document["expiry_date"])
+    if not selected:
+        return f"{heading}: none found."
+
+    lines = [f"{heading} ({len(selected)}):"]
+    lines.extend(
+        f"- {document.get('filename', 'Unnamed agreement')}: {document['expiry_date']}"
+        for document in selected
+    )
+    return "\n".join(lines)
+
+
+def _is_strong_enough_result(result, intent):
+    if not result:
+        return False
+
+    relevance = float(result.get("relevance_score", 0.0))
+    semantic = float(result.get("semantic_score", 0.0))
+    lexical = float(result.get("lexical_score", 0.0))
+    signature = float(result.get("signature_score", 0.0))
+    financial = float(result.get("financial_score", 0.0))
+    lifecycle = float(result.get("lifecycle_score", 0.0))
+    purpose = float(result.get("purpose_score", 0.0))
+    transaction = float(result.get("transaction_score", 0.0))
+
+    if intent == "signature":
+        return signature >= 0.20 or relevance >= 0.20 or (semantic >= 0.40 and lexical >= 0.25)
+    if intent == "commercial":
+        return financial >= 0.20 or relevance >= 0.20 or (semantic >= 0.40 and lexical >= 0.25)
+    if intent == "lifecycle":
+        return lifecycle >= 0.15 or relevance >= 0.20 or lexical >= 1.0 or (semantic >= 0.40 and lexical >= 0.25)
+    if intent == "purpose":
+        return purpose >= 0.15 or relevance >= 0.20 or lexical >= 1.0 or (semantic >= 0.40 and lexical >= 0.25)
+    if intent == "summary":
+        return relevance >= 0.10 or (semantic >= 0.30 and lexical >= 0.50) or lexical >= 0.75
+    if intent == "transaction":
+        return transaction >= 0.15 or relevance >= 0.20 or lexical >= 1.0 or (semantic >= 0.40 and lexical >= 0.25)
+    if intent == "actualization":
+        return result.get("intent_score", 0.0) >= 0.25 or relevance >= 0.20 or lexical >= 1.0 or (semantic >= 0.40 and lexical >= 0.25)
+    return relevance >= 0.15 or lexical >= 1.0 or (semantic >= 0.40 and lexical >= 0.25)
+
+
+def _deduplicate_retrieved_results(results):
+    if not results:
+        return []
+
+    unique_results = {}
+    for result in results:
+        if not result:
+            continue
+        result_key = (
+            result.get("document_id"),
+            result.get("filename"),
+            result.get("page_number"),
+            result.get("chunk_index"),
+        )
+        existing = unique_results.get(result_key)
+        if existing is None:
+            unique_results[result_key] = result
+            continue
+        if float(result.get("final_score", 0.0)) > float(existing.get("final_score", 0.0)):
+            unique_results[result_key] = result
+
+    deduplicated_results = list(unique_results.values())
+    deduplicated_results.sort(
+        key=lambda item: float(item.get("final_score", 0.0)),
+        reverse=True,
+    )
+
+    logger.info(
+        "Evidence deduplication | before=%s | after=%s | removed=%s",
+        len(results),
+        len(deduplicated_results),
+        len(results) - len(deduplicated_results),
+    )
+    return deduplicated_results
+
+
+# ============================================================
+# ASK
+# ============================================================
 
 @app.post("/ask")
 async def ask_question(
