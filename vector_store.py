@@ -461,6 +461,7 @@ class FAISSVectorStore:
         filename,
         chunks,
         user_id=None,
+        persist=True,
     ):
         """
         Add document chunks to the FAISS vector store.
@@ -901,57 +902,53 @@ class FAISSVectorStore:
             # Save index + metadata
             # ----------------------------------------------------
 
-            try:
-
-                self._save()
-
-            except Exception as exc:
-
-                logger.exception(
-                    "Failed to persist FAISS index/metadata | "
-                    "document=%s",
-                    document_id,
-                )
-
-                # ------------------------------------------------
-                # Roll back in-memory changes.
-                #
-                # Important:
-                # _save() uses temporary files, so an existing
-                # persisted index should remain intact if the
-                # temporary replacement was not completed.
-                # ------------------------------------------------
-
+            if persist:
                 try:
+                    self._save()
 
-                    self.index.remove_ids(
-                        ids
-                    )
-
-                except Exception:
-
+                except Exception as exc:
                     logger.exception(
-                        "CRITICAL: Failed to rollback "
-                        "FAISS vectors after save failure | "
+                        "Failed to persist FAISS index/metadata | "
                         "document=%s",
                         document_id,
                     )
 
-                for vector_id in vector_ids:
+                    # ------------------------------------------------
+                    # Roll back in-memory changes.
+                    #
+                    # Important:
+                    # _save() uses temporary files, so an existing
+                    # persisted index should remain intact if the
+                    # temporary replacement was not completed.
+                    # ------------------------------------------------
 
-                    self.metadata.pop(
-                        str(vector_id),
-                        None
+                    try:
+                        self.index.remove_ids(
+                            ids
+                        )
+
+                    except Exception:
+                        logger.exception(
+                            "CRITICAL: Failed to rollback "
+                            "FAISS vectors after save failure | "
+                            "document=%s",
+                            document_id,
+                        )
+
+                    for vector_id in vector_ids:
+                        self.metadata.pop(
+                            str(vector_id),
+                            None
+                        )
+
+                    self.next_vector_id = (
+                        start_vector_id
                     )
 
-                self.next_vector_id = (
-                    start_vector_id
-                )
-
-                raise RuntimeError(
-                    "Failed to save document "
-                    "to the vector store."
-                ) from exc
+                    raise RuntimeError(
+                        "Failed to save document "
+                        "to the vector store."
+                    ) from exc
 
         # ========================================================
         # SUCCESS LOGGING
@@ -975,6 +972,160 @@ class FAISSVectorStore:
         # ========================================================
 
         return len(cleaned_chunks)
+
+    # ========================================================
+    # ADD DOCUMENTS BATCH
+    # ========================================================
+
+    def add_documents_batch(self, documents, user_id=None, persist=True):
+        """
+        Add multiple prepared documents in one embedding call and one
+        FAISS mutation/save.
+
+        documents:
+            [
+                {
+                    "document_id": str,
+                    "filename": str,
+                    "chunks": list[dict|str],
+                    "user_id": optional,
+                },
+                ...
+            ]
+        """
+        if not documents:
+            return []
+
+        prepared = []
+        all_texts = []
+
+        for item in documents:
+            document_id = item.get("document_id")
+            filename = item.get("filename")
+            chunks = item.get("chunks") or []
+            item_user_id = item.get("user_id", user_id)
+
+            if not document_id or not filename:
+                raise ValueError("Batch document is missing document_id or filename.")
+
+            cleaned = []
+            for chunk_index, chunk in enumerate(chunks):
+                if isinstance(chunk, dict):
+                    text = chunk.get("text", "")
+                    page_number = chunk.get("page_number")
+                else:
+                    text = chunk
+                    page_number = None
+
+                if text is None:
+                    continue
+                text = str(text).strip()
+                if not text:
+                    continue
+
+                cleaned.append({
+                    "text": text,
+                    "page_number": page_number,
+                })
+
+            if not cleaned:
+                raise ValueError(
+                    f"No usable chunks found for document: {filename}"
+                )
+
+            prepared.append({
+                "document_id": document_id,
+                "filename": filename,
+                "chunks": cleaned,
+                "user_id": item_user_id,
+            })
+            all_texts.extend(chunk["text"] for chunk in cleaned)
+
+        logger.info(
+            "Creating batch embeddings | documents=%s | chunks=%s",
+            len(prepared),
+            len(all_texts),
+        )
+
+        embeddings = embedding_service.embed_documents(all_texts)
+        vectors = np.asarray(embeddings, dtype="float32")
+
+        if vectors.ndim != 2 or vectors.shape[0] != len(all_texts):
+            raise RuntimeError(
+                "Batch embedding count or shape does not match document chunks."
+            )
+        if vectors.shape[1] != self.dimension:
+            raise RuntimeError(
+                "Batch embedding dimension does not match the FAISS index."
+            )
+        if not np.isfinite(vectors).all():
+            raise RuntimeError("Batch embedding vectors contain invalid values.")
+
+        added = []
+        offset = 0
+
+        with self.lock:
+            start_vector_id = self.next_vector_id
+            total_vectors = len(all_texts)
+            vector_ids = list(
+                range(start_vector_id, start_vector_id + total_vectors)
+            )
+            ids = np.asarray(vector_ids, dtype="int64")
+
+            metadata_entries = {}
+            cursor = 0
+
+            for item in prepared:
+                item_count = len(item["chunks"])
+                item_ids = vector_ids[cursor:cursor + item_count]
+
+                for local_index, chunk in enumerate(item["chunks"]):
+                    vector_id = item_ids[local_index]
+                    metadata_entries[str(vector_id)] = {
+                        "document_id": item["document_id"],
+                        "filename": item["filename"],
+                        "chunk_index": local_index,
+                        "page_number": chunk.get("page_number"),
+                        "text": chunk["text"],
+                        "user_id": item["user_id"],
+                    }
+
+                added.append({
+                    "document_id": item["document_id"],
+                    "filename": item["filename"],
+                    "chunks_added": item_count,
+                })
+                cursor += item_count
+
+            try:
+                self.index.add_with_ids(vectors, ids)
+                self.metadata.update(metadata_entries)
+                self.next_vector_id = start_vector_id + total_vectors
+
+                if persist:
+                    self._save()
+
+            except Exception as exc:
+                logger.exception(
+                    "Batch FAISS update failed; rolling back %s vectors.",
+                    total_vectors,
+                )
+                try:
+                    self.index.remove_ids(ids)
+                except Exception:
+                    logger.exception("CRITICAL: failed to rollback batch vectors")
+
+                for vector_id in vector_ids:
+                    self.metadata.pop(str(vector_id), None)
+                self.next_vector_id = start_vector_id
+                raise RuntimeError("Failed to persist batch document vectors.") from exc
+
+        logger.info(
+            "Batch documents indexed | documents=%s | vectors=%s",
+            len(prepared),
+            total_vectors,
+        )
+        return added
 
     # ========================================================
     # TOKENIZER
