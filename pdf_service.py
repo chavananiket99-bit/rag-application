@@ -1,4 +1,5 @@
 import logging
+
 from services.pdf_reader import read_pdf
 from services.ocr_reader import read_scanned_pdf
 from services.chunk_service import split_text
@@ -7,154 +8,118 @@ logger = logging.getLogger("uvicorn.error")
 
 MIN_USABLE_TEXT_LENGTH = 20
 
-def _has_usable_text(pages):
-    """
-    Determine whether normal PDF extraction produced meaningful text.
-    Some PDFs technically return a few characters, whitespace,
-    page numbers, or garbage text even though OCR is required.
-    """
-    if not pages:
+
+def _has_usable_page_text(text):
+    if text is None:
         return False
+    compact = "".join(str(text).split())
+    return len(compact) >= MIN_USABLE_TEXT_LENGTH
 
-    extracted_text = "\n".join(
-        str(page.get("text", "") or "")
-        for page in pages
-    ).strip()
-
-    if len(extracted_text) < MIN_USABLE_TEXT_LENGTH:
-        return False
-
-    # Remove whitespace and check whether we have actual content.
-    compact_text = "".join(
-        extracted_text.split()
-    )
-
-    return len(compact_text) >= MIN_USABLE_TEXT_LENGTH
 
 def _build_full_text(pages):
-    """
-    Build full document text while preserving page order.
-    """
     return "\n".join(
         str(page.get("text", "") or "").strip()
         for page in pages
         if page.get("text")
     ).strip()
 
-def extract_text(pdf_path):
-    """
-    Extract text from a PDF.
-    Processing flow:
-        PDF
-            |
-            +--> Normal text extraction
-            |
-            +--> Usable text?
-                    |
-                +----+----+
-                |         |
-                YES       NO
-                |         |
-                |        OCR
-                |         |
-                +----+----+
-                    |  
-                Page-aware
-                chunks
-    
-    Returns:
-        {
-            "text": str,
-            "pages": list[dict],
-            "chunks": list[dict],
-            "ocr_used": bool
-        }
-    """
 
-    logger.info(
-        "Extracting text from PDF: %s",
-        pdf_path
-    )
+def extract_text(pdf_path, progress_callback=None):
+    """
+    Page-aware extraction pipeline:
+      1. PyMuPDF/pypdf text extraction first.
+      2. Pages with sufficient native text bypass OCR.
+      3. Only pages without usable text go to the bounded RapidOCR pool.
+      4. OCR results are restored to original page order.
+      5. Chunking happens after the complete ordered page list exists.
+    """
+    logger.info("Extracting text from PDF: %s", pdf_path)
 
-    # ============================================================
-    # STEP 1 — NORMAL TEXT EXTRACTION
-    # ============================================================
     try:
-        pages = read_pdf(pdf_path)
-
+        pages = read_pdf(pdf_path) or []
     except Exception as exc:
-        logger.exception(
-            "Normal PDF text extraction failed: %s",
-            exc
+        logger.exception("Normal PDF text extraction failed: %s", exc)
+        pages = []
+
+    total_pages = len(pages)
+
+    # If the normal reader could not even establish page structure, fall
+    # back to OCR of the complete document.
+    if not pages:
+        logger.info("No native pages found. OCRing complete PDF: %s", pdf_path)
+        ocr_results = read_scanned_pdf(
+            pdf_path,
+            progress_callback=progress_callback,
+            total_pages=0,
         )
+        doc_page_count = max(ocr_results.keys(), default=-1) + 1
+        pages = [
+            {"page_number": i + 1, "text": ocr_results.get(i, "")}
+            for i in range(doc_page_count)
+        ]
+        ocr_used = bool(pages)
+    else:
+        ocr_page_numbers = [
+            i for i, page in enumerate(pages)
+            if not _has_usable_page_text(page.get("text", ""))
+        ]
 
-        pages = []
-
-    if pages is None:
-        pages = []
-
-    # ============================================================
-    # STEP 2 — CHECK WHETHER NORMAL EXTRACTION IS USABLE
-    # ============================================================
-    ocr_used = False
-
-    if not _has_usable_text(pages):
+        native_count = total_pages - len(ocr_page_numbers)
         logger.info(
-            "PDF does not contain sufficient usable text. "
-            "Performing OCR: %s",
-            pdf_path
+            "Page-aware extraction | total=%s | native=%s | OCR=%s",
+            total_pages,
+            native_count,
+            len(ocr_page_numbers),
         )
 
-        try:
-            pages = read_scanned_pdf(pdf_path)
-            ocr_used = True
+        # Report native pages immediately so the UI reflects actual work.
+        if progress_callback and total_pages:
+            for i, page in enumerate(pages):
+                if i not in set(ocr_page_numbers):
+                    try:
+                        progress_callback(i + 1, total_pages)
+                    except Exception:
+                        logger.debug("Progress callback failed.", exc_info=True)
 
-        except Exception as exc:
-            logger.exception(
-                "OCR extraction failed: %s",
-                exc
+        ocr_results = {}
+        if ocr_page_numbers:
+            def ocr_progress(completed_ocr, total_ocr, overall_total):
+                # Progress is approximate here because native pages may have
+                # already completed; the final ordered result is authoritative.
+                completed_overall = min(
+                    overall_total,
+                    native_count + completed_ocr,
+                )
+                if progress_callback:
+                    progress_callback(
+                        completed_overall,
+                        overall_total,
+                    )
+
+            ocr_results = read_scanned_pdf(
+                pdf_path,
+                page_numbers=ocr_page_numbers,
+                progress_callback=ocr_progress,
+                total_pages=total_pages,
             )
 
-            raise RuntimeError(
-                "Unable to extract text from PDF."
-            ) from exc
+            for page_index, text in ocr_results.items():
+                pages[page_index]["text"] = text
 
-    if pages is None:
-        pages = []
+        ocr_used = bool(ocr_page_numbers)
 
-    # ============================================================
-    # STEP 3 — BUILD FULL TEXT
-    # ============================================================
     text = _build_full_text(pages)
 
-    # ============================================================
-    # STEP 4 — CHUNKING
-    # ============================================================
-    chunks = []
+    try:
+        chunks = split_text(pages) if pages else []
+    except Exception as exc:
+        logger.exception("PDF chunking failed: %s", exc)
+        raise RuntimeError("Unable to create document chunks.") from exc
 
-    if pages:
-        try:
-            chunks = split_text(pages)
+    chunks = chunks or []
 
-        except Exception as exc:
-            logger.exception(
-                "PDF chunking failed: %s",
-                exc
-            )
-
-            raise RuntimeError(
-                "Unable to create document chunks."
-            ) from exc
-
-    if chunks is None:
-        chunks = []
-
-    # ============================================================
-    # STEP 5 — LOGGING
-    # ============================================================
     logger.info(
-        "PDF processing completed | "
-        "Pages=%s | Characters=%s | Chunks=%s | OCR=%s",
+        "PDF processing completed | Pages=%s | Characters=%s | Chunks=%s | OCR=%s",
         len(pages),
         len(text),
         len(chunks),
